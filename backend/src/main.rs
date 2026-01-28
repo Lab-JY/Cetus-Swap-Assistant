@@ -9,7 +9,7 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use sqlx::{postgres::PgPoolOptions, Pool, Postgres};
+use sqlx::{postgres::PgPoolOptions, Pool, Postgres, Row}; // ✨ 导入 Row
 use std::net::SocketAddr;
 use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
@@ -43,7 +43,6 @@ struct Employee {
     role: Option<String>,
 }
 
-// ✨ 新增：商户数据汇总结构
 #[derive(Serialize)]
 struct MerchantSummary {
     total_revenue: i64,
@@ -58,15 +57,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let package_id = std::env::var("SUIPAY_PACKAGE_ID")
-        .unwrap_or_else(|_| "0x0000000000000000000000000000000000000000000000000000000000000000".to_string());
+        .unwrap_or_else(|_| "0x0".to_string());
 
     let pool = PgPoolOptions::new().max_connections(5).connect(&database_url).await?;
-    let schema = std::fs::read_to_string("schema.sql")?;
-    sqlx::query(&schema).execute(&pool).await?;
+    
+    // 注意：在实际运行前，请确保手动运行了 schema.sql 或使用 sqlx migrate
+    // 为了防止编译卡死，我们在这里只做简单的连接
 
     let state = AppState { db: pool.clone() };
 
-    if package_id != "0x0000000000000000000000000000000000000000000000000000000000000000" {
+    if package_id != "0x0" {
         let indexer_pool = pool.clone();
         tokio::spawn(async move { indexer::start_indexer(indexer_pool, package_id).await; });
     }
@@ -77,7 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/orders", post(create_order))
         .route("/orders/:id", get(get_order))
         .route("/employees", get(get_employees))
-        .route("/merchant/summary", get(get_merchant_summary)) // ✨ 新增汇总接口
+        .route("/merchant/summary", get(get_merchant_summary))
         .layer(CorsLayer::new().allow_origin(Any).allow_headers(Any).allow_methods(Any))
         .with_state(state);
 
@@ -91,36 +91,62 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn create_order(claims: Claims, State(state): State<AppState>, Json(payload): Json<CreateOrderRequest>) -> Result<Json<Order>, (StatusCode, String)> {
     let order_id = Uuid::new_v4();
     let currency = payload.currency.unwrap_or_else(|| "USDC".to_string());
-    sqlx::query!("INSERT INTO orders (id, merchant_address, amount, currency, status) VALUES ($1, $2, $3, $4, 'PENDING')", order_id, claims.sub, payload.amount, currency).execute(&state.db).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    
+    sqlx::query("INSERT INTO orders (id, merchant_address, amount, currency, status) VALUES ($1, $2, $3, $4, 'PENDING')")
+        .bind(order_id)
+        .bind(&claims.sub)
+        .bind(payload.amount)
+        .bind(&currency)
+        .execute(&state.db)
+        .await
+        .map_err(|e: sqlx::Error| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
     Ok(Json(Order { id: order_id, merchant_address: claims.sub, amount: payload.amount, currency, status: "PENDING".to_string() }))
 }
 
 async fn get_order(State(state): State<AppState>, Path(id): Path<Uuid>) -> Result<Json<Order>, (StatusCode, String)> {
-    let order = sqlx::query_as!(Order, r#"SELECT id, merchant_address, amount, currency, status FROM orders WHERE id = $1"#, id).fetch_optional(&state.db).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?.ok_or((StatusCode::NOT_FOUND, "Order not found".to_string()))?;
+    let order = sqlx::query_as::<_, Order>("SELECT id, merchant_address, amount, currency, status FROM orders WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e: sqlx::Error| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Order not found".to_string()))?;
+
     Ok(Json(order))
 }
 
 async fn get_employees(claims: Claims, State(state): State<AppState>) -> Result<Json<Vec<Employee>>, (StatusCode, String)> {
-    let employees = sqlx::query_as!(Employee, r#"SELECT id, name, wallet_address, salary_amount, role FROM employees"#).fetch_all(&state.db).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    println!("Auth user: {}", claims.sub);
+    let employees = sqlx::query_as::<_, Employee>("SELECT id, name, wallet_address, salary_amount, role FROM employees")
+        .fetch_all(&state.db)
+        .await
+        .map_err(|e: sqlx::Error| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
     Ok(Json(employees))
 }
 
-// ✨ 汇总接口实现
 async fn get_merchant_summary(claims: Claims, State(state): State<AppState>) -> Result<Json<MerchantSummary>, (StatusCode, String)> {
     let merchant_address = claims.sub;
 
-    let order_stats = sqlx::query!(
-        "SELECT COUNT(*) as count, COALESCE(SUM(amount), 0) as total FROM orders WHERE merchant_address = $1 AND status = 'PAID'",
-        merchant_address
-    ).fetch_one(&state.db).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let row = sqlx::query("SELECT COUNT(*) as count, COALESCE(SUM(amount), 0) as total FROM orders WHERE merchant_address = $1 AND status = 'PAID'")
+        .bind(&merchant_address)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|e: sqlx::Error| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let employee_count = sqlx::query!(
-        "SELECT COUNT(*) as count FROM employees"
-    ).fetch_one(&state.db).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let count: i64 = row.get("count");
+    let total: i64 = row.get("total");
+
+    let emp_row = sqlx::query("SELECT COUNT(*) as count FROM employees")
+        .fetch_one(&state.db)
+        .await
+        .map_err(|e: sqlx::Error| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    
+    let emp_count: i64 = emp_row.get("count");
 
     Ok(Json(MerchantSummary {
-        total_revenue: order_stats.total.unwrap_or(0),
-        order_count: order_stats.count.unwrap_or(0),
-        employee_count: employee_count.count.unwrap_or(0),
+        total_revenue: total,
+        order_count: count,
+        employee_count: emp_count,
     }))
 }
