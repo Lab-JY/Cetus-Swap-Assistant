@@ -1,0 +1,18 @@
+# Dependencies
+node_modules/
+backend/target/
+frontend/.next/
+frontend/out/
+
+# Database & Environment
+.env
+backend/.env
+*.db
+*.db-journal
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Sui build artifacts
+contracts/suipay/build/
