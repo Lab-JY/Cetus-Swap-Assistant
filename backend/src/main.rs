@@ -100,6 +100,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/orders/:id", get(get_order))
         .route("/employees", get(get_employees).post(add_employee))
         .route("/merchant/summary", get(get_merchant_summary))
+        .route("/merchant/rebalance", post(record_rebalance)) // ✨ New Audit Endpoint
         .layer(CorsLayer::new().allow_origin(Any).allow_headers(Any).allow_methods(Any))
         .with_state(state);
 
@@ -108,6 +109,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+#[derive(Deserialize)]
+struct RebalanceRequest {
+    tx_digest: String,
+    from_coin: String,
+    to_coin: String,
+    amount: f64,
+}
+
+async fn record_rebalance(claims: Claims, State(_state): State<AppState>, Json(payload): Json<RebalanceRequest>) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // In a real app, we would insert this into a 'treasury_audit_log' table
+    println!("📝 [AUDIT] Rebalance recorded by Merchant: {}", claims.sub);
+    println!("   TX: {}", payload.tx_digest);
+    println!("   Action: Swap {} {} -> {}", payload.amount, payload.from_coin, payload.to_coin);
+    
+    // For MVP demo, just logging is enough to prove the backend is aware
+    Ok(Json(serde_json::json!({ "status": "recorded", "audit_id": Uuid::new_v4() })))
 }
 
 async fn create_order(claims: Claims, State(state): State<AppState>, Json(payload): Json<CreateOrderRequest>) -> Result<Json<Order>, (StatusCode, String)> {

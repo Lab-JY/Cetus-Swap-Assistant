@@ -30,6 +30,8 @@ struct SuiEvent {
 
 #[derive(Deserialize, Debug)]
 struct PaymentEventData {
+    merchant: String,
+    amount: String, // Sui events return u64 as string usually
     ref_id: String,
 }
 
@@ -45,6 +47,9 @@ pub async fn start_indexer(pool: Pool<Postgres>, package_id: String) {
                     if let Some(data) = event.parsedJson {
                         let order_id_str = data.ref_id;
                         
+                        // Log payment details
+                        println!("💸 Detected Payment: {} - Amount: {}", order_id_str, data.amount);
+
                         if let Ok(uuid) = uuid::Uuid::parse_str(&order_id_str) {
                             println!("🔎 Found payment event for Order: {}", uuid);
 
@@ -57,6 +62,9 @@ pub async fn start_indexer(pool: Pool<Postgres>, package_id: String) {
                                 Ok(rows) => {
                                     if rows.rows_affected() > 0 {
                                         println!("✅ Order {} marked as PAID!", uuid);
+                                    } else {
+                                        // Already paid or not found
+                                        // println!("ℹ️ Order {} already processed or not found.", uuid);
                                     }
                                 }
                                 Err(e) => eprintln!("❌ Failed to update DB: {}", e),

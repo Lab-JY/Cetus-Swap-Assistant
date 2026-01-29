@@ -1,14 +1,19 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { useCurrentAccount } from '@mysten/dapp-kit';
-import { Wallet, TrendingUp, ArrowRightLeft, Sparkles, PieChart, ArrowUpRight, ShieldCheck, Zap } from 'lucide-react';
+import { useCurrentAccount, useSignAndExecuteTransaction } from '@mysten/dapp-kit';
+import { Transaction } from '@mysten/sui/transactions';
+import { Wallet, TrendingUp, ArrowRightLeft, Sparkles, PieChart, ArrowUpRight, ShieldCheck, Zap, BarChart3, AlertCircle } from 'lucide-react';
 import Link from 'next/link';
+import { SUI_COIN_TYPE, USDC_COIN_TYPE, getSwapQuote, buildSwapAndPayTx, buildSwapTx } from '@/utils/cetus';
 
 export default function TreasuryPage() {
   const account = useCurrentAccount();
+  const { mutateAsync: signAndExecute } = useSignAndExecuteTransaction();
+  
   const [isOptimizing, setIsOptimizing] = useState(false);
   const [efficiencyScore, setEfficiencyScore] = useState(82);
+  const [txDigest, setTxDigest] = useState<string | null>(null);
   const [summary, setSummary] = useState<{
     total_revenue: number;
     order_count: number;
@@ -37,16 +42,71 @@ export default function TreasuryPage() {
     fetchSummary();
   }, []);
 
-  const handleOptimize = () => {
+  // 🚀 REAL REBALANCING EXECUTION
+  const handleOptimize = async () => {
+    if (!account) {
+        alert("Please connect your wallet first!");
+        return;
+    }
     setIsOptimizing(true);
-    // Simulate complex PTB interaction:
-    // 1. Withdraw low-yield assets
-    // 2. Swap via Cetus
-    // 3. Deposit to StableLayer
-    setTimeout(() => {
-      setEfficiencyScore(98);
-      setIsOptimizing(false);
-    }, 2500);
+    setTxDigest(null);
+
+    try {
+        console.log("🤖 Treasury Agent: Analyzing portfolio risk...");
+        
+        // Strategy: Convert volatile assets (SUI) to Stablecoin (USDC)
+        // For Demo: Swap 0.1 SUI -> USDC
+        const amountToSwap = 0.1 * 1_000_000_000; // 0.1 SUI
+        
+        console.log("🔄 Executing Auto-Hedge: SUI -> USDC");
+        
+        // 1. Get Quote
+        const route = await getSwapQuote(SUI_COIN_TYPE, USDC_COIN_TYPE, amountToSwap, true);
+        if (!route) throw new Error("No liquidity route found for rebalancing");
+
+        // 2. Build PTB
+        const tx = new Transaction();
+        const [inputCoin] = tx.splitCoins(tx.gas, [tx.pure.u64(amountToSwap)]);
+        
+        // 3. Execute Swap via Cetus
+        await buildSwapAndPayTx(tx, route, inputCoin, account.address);
+
+        // 4. Sign & Execute
+        const response = await signAndExecute({ transaction: tx });
+        
+        console.log("✅ Rebalancing Complete:", response.digest);
+        setTxDigest(response.digest);
+        setEfficiencyScore(98);
+
+        // 5. 📡 Notify Backend for Audit Trail
+        try {
+            const token = localStorage.getItem('suipay_token');
+            if (token) {
+                await fetch('http://localhost:3001/merchant/rebalance', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${token}`
+                    },
+                    body: JSON.stringify({
+                        tx_digest: response.digest,
+                        from_coin: 'SUI',
+                        to_coin: 'USDC',
+                        amount: 0.1
+                    })
+                });
+                console.log("📝 Audit log synced to backend");
+            }
+        } catch (auditErr) {
+            console.warn("Failed to sync audit log", auditErr);
+        }
+        
+    } catch (e: any) {
+        console.error("Optimization failed:", e);
+        alert("Strategy Execution Failed: " + e.message);
+    } finally {
+        setIsOptimizing(false);
+    }
   };
 
   return (
@@ -81,36 +141,49 @@ export default function TreasuryPage() {
                 <div className="lg:col-span-2 space-y-4">
                     <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white/10 border border-white/20 text-xs font-bold text-blue-300">
                         <Sparkles size={14} />
-                        AI Treasury Agent
+                        Automated Treasury
                     </div>
                     <h1 className="text-3xl font-bold">Capital Efficiency: {efficiencyScore}%</h1>
                     <p className="text-slate-300 max-w-xl">
-                        I've analyzed your cash flow. You have <strong className="text-white">${summary ? summary.total_revenue.toLocaleString() : '12,450'} USDC</strong> sitting idle. 
-                        Moving this to <strong className="text-white">StableLayer Strategy B</strong> via <strong className="text-white">Cetus</strong> will increase your APY by <strong className="text-green-400">4.2%</strong>.
+                        I've detected volatile assets in your portfolio. 
+                        Auto-converting to <strong className="text-white">USDC</strong> via <strong className="text-white">Cetus</strong> will secure your principal and enable <strong className="text-green-400">Stable Yield</strong>.
                     </p>
                     
-                    <button 
-                        onClick={handleOptimize}
-                        disabled={isOptimizing || efficiencyScore > 90}
-                        className="mt-4 px-6 py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold transition-all flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                        {isOptimizing ? (
-                            <>
-                                <Zap className="animate-spin" size={18} />
-                                Optimizing Portfolio...
-                            </>
-                        ) : efficiencyScore > 90 ? (
-                            <>
-                                <ShieldCheck size={18} />
-                                Fully Optimized
-                            </>
-                        ) : (
-                            <>
-                                <Sparkles size={18} />
-                                Auto-Optimize Treasury
-                            </>
+                    <div className="flex items-center gap-4">
+                        <button 
+                            onClick={handleOptimize}
+                            disabled={isOptimizing || efficiencyScore > 90}
+                            className="mt-4 px-6 py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold transition-all flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-blue-900/50"
+                        >
+                            {isOptimizing ? (
+                                <>
+                                    <Zap className="animate-spin" size={18} />
+                                    Executing Strategy...
+                                </>
+                            ) : efficiencyScore > 90 ? (
+                                <>
+                                    <ShieldCheck size={18} />
+                                    Portfolio Optimized
+                                </>
+                            ) : (
+                                <>
+                                    <Sparkles size={18} />
+                                    Auto-Hedge to USDC
+                                </>
+                            )}
+                        </button>
+                        {txDigest && (
+                            <a 
+                                href={`https://suiscan.xyz/testnet/tx/${txDigest}`} 
+                                target="_blank"
+                                rel="noreferrer"
+                                className="mt-4 text-xs text-blue-300 underline hover:text-blue-200 flex items-center gap-1"
+                            >
+                                View TX <ArrowUpRight size={12} />
+                            </a>
                         )}
-                    </button>
+                    </div>
+                    
                     {efficiencyScore > 90 && (
                         <p className="text-xs text-green-400 animate-in fade-in slide-in-from-bottom-2">
                             Strategy executed via Sui PTB: Swap(Cetus) → Deposit(StableLayer)

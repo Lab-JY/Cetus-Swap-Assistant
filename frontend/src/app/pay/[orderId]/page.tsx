@@ -64,8 +64,8 @@ export default function CheckoutPage({ params }: { params: { orderId: string } }
         }
 
         // Target: USDC, Amount: orderData.amount
-        // We need to fix Output Amount
-        const amountOut = Math.floor(orderData.amount * 1_000_000); // 6 decimals for USDC
+        // Use Math.round to avoid floating point precision issues (e.g. 9.999999)
+        const amountOut = Math.round(orderData.amount * 1_000_000); // 6 decimals for USDC
         
         // SUI -> USDC (Fix Output)
         // Note: Cetus Aggregator 'byAmountIn' = false means Fix Output
@@ -74,8 +74,8 @@ export default function CheckoutPage({ params }: { params: { orderId: string } }
         if (route) {
             setSwapRoute(route);
             // route.amountIn is the required input amount (e.g. SUI)
-            // Convert back to human readable (SUI has 9 decimals)
-            const requiredSui = Number(route.amountIn) / 1_000_000_000;
+            // Add 1% buffer for UI display purposes (actual buffer applied in tx)
+            const requiredSui = (Number(route.amountIn) * 1.01) / 1_000_000_000;
             setEstimatedCost(requiredSui.toFixed(4));
         }
     }
@@ -95,10 +95,15 @@ export default function CheckoutPage({ params }: { params: { orderId: string } }
         console.log('Executing Cetus Swap...');
         
         // 1. Get required input amount from route
-        const amountInInt = BigInt(swapRoute.amountIn.toString());
+        // CRITICAL: Add Slippage Buffer for Exact Output Swaps
+        // If we split exactly 'amountIn', any small price movement causes failure.
+        // We add 0.5% buffer. Unused SUI is automatically refunded by the router.
+        const rawAmountIn = BigInt(swapRoute.amountIn.toString());
+        // Use BigInt constructor for literals to support older TS targets
+        const amountInWithSlippage = rawAmountIn + (rawAmountIn * BigInt(50) / BigInt(10000)); // +0.5%
         
-        // 2. Split SUI coin from gas
-        const [inputCoin] = tx.splitCoins(tx.gas, [tx.pure.u64(amountInInt)]);
+        // 2. Split SUI coin from gas with buffer
+        const [inputCoin] = tx.splitCoins(tx.gas, [tx.pure.u64(amountInWithSlippage)]);
         
         // 3. Build PTB with Cetus SDK
         // This performs swap and transfers output coin to merchant
