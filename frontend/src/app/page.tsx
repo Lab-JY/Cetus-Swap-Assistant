@@ -1,7 +1,7 @@
 'use client';
 
 import { ConnectButton, useCurrentAccount, useSignPersonalMessage, useSignAndExecuteTransaction, useSuiClientQuery } from '@mysten/dapp-kit';
-import { Wallet, CreditCard, Users, ArrowUpRight, BarChart3, ShieldCheck, LogIn, TrendingUp, Power, Chrome, Apple, Loader2 } from 'lucide-react';
+import { Wallet, CreditCard, Users, ArrowUpRight, BarChart3, ShieldCheck, LogIn, TrendingUp, Power, Chrome, Apple, Loader2, Sparkles } from 'lucide-react';
 import Link from 'next/link';
 import { useState, useEffect } from 'react';
 import { generateNonce, generateRandomness } from '@mysten/zklogin';
@@ -296,14 +296,41 @@ export default function Home() {
                 <h3 className="text-2xl font-bold mb-2">Merchant Terminal</h3>
                 <p className="text-slate-500">Generate professional payment links and QR codes.</p>
               </Link>
-              <Link href="/payroll" className="group p-10 bg-white rounded-[2.5rem] border border-slate-100 shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all">
-                <div className="h-14 w-14 bg-slate-50 rounded-2xl flex items-center justify-center mb-6 group-hover:bg-slate-900 group-hover:text-white transition-colors">
-                  <Users size={28} />
+              <Link href="/payroll" className="group p-8 bg-white border border-slate-100 rounded-3xl shadow-sm hover:shadow-xl hover:shadow-slate-200/50 hover:scale-[1.02] transition-all cursor-pointer">
+                <div className="flex items-start justify-between mb-10">
+                  <div className="p-4 bg-purple-50 text-purple-600 rounded-2xl">
+                    <Users size={32} />
+                  </div>
+                  <ArrowUpRight size={24} className="text-slate-300 group-hover:text-purple-600 transition-colors" />
                 </div>
-                <h3 className="text-2xl font-bold mb-2">Bulk Payroll</h3>
-                <p className="text-slate-500">Atomic salary distribution using Sui PTB.</p>
+                <h3 className="text-2xl font-bold text-slate-800 mb-2">Run Payroll</h3>
+                <p className="text-slate-500">Mass payouts via Sui PTB. <span className="text-purple-600 font-bold text-xs bg-purple-50 px-2 py-1 rounded-full">New</span></p>
               </Link>
             </div>
+            
+            {/* Treasury Banner */}
+            <div className="mt-8">
+                <Link href="/treasury" className="group relative block overflow-hidden rounded-3xl bg-slate-900 p-8 text-white shadow-xl hover:scale-[1.01] transition-all">
+                    <div className="absolute top-0 right-0 -mt-10 -mr-10 h-64 w-64 rounded-full bg-blue-600/30 blur-3xl"></div>
+                    <div className="relative z-10 flex items-center justify-between">
+                        <div>
+                            <div className="inline-flex items-center gap-2 rounded-full bg-white/10 px-3 py-1 text-xs font-bold text-blue-300 mb-3 border border-white/20">
+                                <Sparkles size={14} />
+                                AI Treasury Agent
+                            </div>
+                            <h3 className="text-2xl font-bold mb-2">Optimize Your Idle Capital</h3>
+                            <p className="text-slate-400 max-w-lg">
+                                Your treasury is running at <strong>82% efficiency</strong>. 
+                                Click to auto-rebalance via Cetus & StableLayer.
+                            </p>
+                        </div>
+                        <div className="h-14 w-14 bg-white/10 rounded-full flex items-center justify-center group-hover:bg-blue-600 transition-colors">
+                            <ArrowUpRight size={28} />
+                        </div>
+                    </div>
+                </Link>
+            </div>
+
           </div>
         )}
       </main>
