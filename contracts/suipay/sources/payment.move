@@ -7,8 +7,9 @@ module suipay::payment {
     // --- Error Codes ---
     const EInsufficientBalance: u64 = 1;
     const EOrderAlreadyPaid: u64 = 2;
-    const ENotMerchant: u64 = 3;
-    const ENotAuthorized: u64 = 4; // ✨ 新增：未授权错误
+    // const ENotMerchant: u64 = 3;
+    const ENotAuthorized: u64 = 4; 
+    const EWrongMerchant: u64 = 5; 
 
     // --- Constants ---
     const STATUS_PENDING: u8 = 0;
@@ -27,7 +28,7 @@ module suipay::payment {
         balance: Balance<T>,
         total_received: u64,
         auto_yield: bool, 
-        cap_id: ID, // ✨ 核心改进：记录绑定的 Cap ID
+        cap_id: ID, 
     }
 
     public struct Order has key, store {
@@ -74,61 +75,87 @@ module suipay::payment {
         transfer::share_object(merchant_account);
     }
 
+    /// ✨ 新增：创建订单
+    public entry fun create_order<T>(
+        account: &MerchantAccount<T>,
+        amount: u64,
+        order_id: String,
+        ctx: &mut TxContext
+    ) {
+        let order = Order {
+            id: object::new(ctx),
+            merchant_account: object::uid_to_address(&account.id),
+            amount,
+            status: STATUS_PENDING,
+            order_id,
+        };
+        transfer::share_object(order);
+    }
+
     public entry fun pay_order<T>(
         account: &mut MerchantAccount<T>,
         order: &mut Order,
         mut payment: Coin<T>,
         ctx: &mut TxContext
     ) {
-        let order_amount = order.amount;
-        assert!(order.status == STATUS_PENDING, EOrderAlreadyPaid);
-        assert!(coin::value(&payment) >= order_amount, EInsufficientBalance);
-
-        let paid_coin = coin::split(&mut payment, order_amount, ctx);
+        let payment_amount = coin::value(&payment);
         
-        // 逻辑保持不变...
-        let paid_balance = coin::into_balance(paid_coin);
-        account.balance.join(paid_balance);
-        account.total_received = account.total_received + order_amount;
+        // 1. Check if payment amount is sufficient
+        assert!(payment_amount >= order.amount, EInsufficientBalance);
+        
+        // 2. Check if order is already paid
+        assert!(order.status == STATUS_PENDING, EOrderAlreadyPaid);
 
-        if (coin::value(&payment) > 0) {
-            transfer::public_transfer(payment, ctx.sender());
-        } else {
-            coin::destroy_zero(payment);
+        // 3. Verify Merchant
+        assert!(object::uid_to_address(&account.id) == order.merchant_account, EWrongMerchant);
+        
+        // 4. Update Order status
+        order.status = STATUS_PAID;
+        
+        // 5. Handle excess payment (refund)
+        if (payment_amount > order.amount) {
+            let refund = coin::split(&mut payment, payment_amount - order.amount, ctx);
+            transfer::public_transfer(refund, ctx.sender());
         };
 
-        order.status = STATUS_PAID;
+        // 6. Deposit to Merchant Account
+        let paid_amount = coin::into_balance(payment);
+        balance::join(&mut account.balance, paid_amount);
+        account.total_received = account.total_received + order.amount;
+
+        // 7. Emit Event for StableLayer Tracking
         event::emit(PaymentReceived {
             merchant: account.owner,
-            amount: order_amount,
-            order_id: object::id(order),
+            amount: order.amount,
+            order_id: object::uid_to_inner(&order.id),
             ref_id: order.order_id,
-            yield_active: account.auto_yield,
+            yield_active: account.auto_yield, 
         });
     }
 
-    /// 🛠️ 修复：增加权限校验
-    public entry fun toggle_yield<T>(
-        cap: &MerchantCap,
+    /// ✨ Enable/Disable Auto-Yield for StableLayer
+    public entry fun set_auto_yield<T>(
         account: &mut MerchantAccount<T>,
+        cap: &MerchantCap,
+        enable: bool,
         _ctx: &mut TxContext
     ) {
-        // ✨ 校验：传入的 Cap 必须是绑定的那个
+        // Verify ownership via Cap ID
         assert!(object::uid_to_inner(&cap.id) == account.cap_id, ENotAuthorized);
-        account.auto_yield = !account.auto_yield;
+        account.auto_yield = enable;
     }
-
-    /// 🛠️ 修复：增加权限校验
+    
+    /// ✨ Withdraw funds (for Payroll)
     public entry fun withdraw<T>(
-        cap: &MerchantCap,
         account: &mut MerchantAccount<T>,
+        cap: &MerchantCap,
+        amount: u64,
         ctx: &mut TxContext
     ) {
-        // ✨ 校验：传入的 Cap 必须是绑定的那个
         assert!(object::uid_to_inner(&cap.id) == account.cap_id, ENotAuthorized);
+        assert!(balance::value(&account.balance) >= amount, EInsufficientBalance);
         
-        let amount = account.balance.value();
-        let cash = coin::take(&mut account.balance, amount, ctx);
-        transfer::public_transfer(cash, ctx.sender());
+        let withdraw_coin = coin::take(&mut account.balance, amount, ctx);
+        transfer::public_transfer(withdraw_coin, account.owner);
     }
 }

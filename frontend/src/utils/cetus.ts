@@ -17,7 +17,7 @@ export const USDC_COIN_TYPE = "0x5d4b302506645c37ff133b98c4b50a5ae14841659738d6d
 
 const client = new AggregatorClient(
     'https://fullnode.testnet.sui.io:443',
-    // @ts-ignore - The type definition might be strict about address being string
+    // 使用有效的 Sui 地址 (例如 0x0)
     '0x0000000000000000000000000000000000000000000000000000000000000000', 
     Env.Testnet
 );
@@ -70,4 +70,27 @@ export async function buildSwapAndPayTx(
     tx.transferObjects([targetCoin], tx.pure.address(targetMerchantAddress));
     
     return tx;
+}
+
+/**
+ * Builds a swap transaction and returns the target coin object.
+ * This is useful for PTBs (Programmable Transaction Blocks) where you want to do something 
+ * with the swapped coin (e.g. split it and pay multiple people)
+ */
+export async function buildSwapTx(
+    tx: Transaction,
+    routers: any,
+    inputCoin: any,
+    slippage: number = 0.05
+) {
+    if (!routers) throw new Error("No route found");
+
+    const targetCoin = await client.routerSwap({
+        router: routers,
+        txb: tx,
+        inputCoin,
+        slippage,
+    });
+
+    return targetCoin;
 }

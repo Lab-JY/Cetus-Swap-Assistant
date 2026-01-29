@@ -34,6 +34,28 @@ struct CreateOrderRequest {
     currency: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct CreateEmployeeRequest {
+    name: String,
+    wallet_address: String,
+    salary_amount: i64,
+    role: String,
+}
+
+async fn add_employee(_claims: Claims, State(state): State<AppState>, Json(payload): Json<CreateEmployeeRequest>) -> Result<Json<Employee>, (StatusCode, String)> {
+    let row = sqlx::query_as::<_, Employee>("INSERT INTO employees (name, wallet_address, salary_amount, role) VALUES ($1, $2, $3, $4) RETURNING id, name, wallet_address, salary_amount, role")
+        .bind(payload.name)
+        .bind(payload.wallet_address)
+        .bind(payload.salary_amount)
+        .bind(payload.role)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|e: sqlx::Error| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(row))
+}
+
+
 #[derive(Serialize, Deserialize, sqlx::FromRow)]
 struct Employee {
     id: i32,
@@ -76,12 +98,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/auth/zklogin/verify", post(zklogin_verify_handler))
         .route("/orders", post(create_order))
         .route("/orders/:id", get(get_order))
-        .route("/employees", get(get_employees))
+        .route("/employees", get(get_employees).post(add_employee))
         .route("/merchant/summary", get(get_merchant_summary))
         .layer(CorsLayer::new().allow_origin(Any).allow_headers(Any).allow_methods(Any))
         .with_state(state);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 3001));
+    let addr = SocketAddr::from(([0, 0, 0, 0], 3002));
     println!("Backend server listening on {}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
@@ -115,6 +137,22 @@ async fn get_order(State(state): State<AppState>, Path(id): Path<Uuid>) -> Resul
     Ok(Json(order))
 }
 
+// ✨ 仅用于演示/开发：强制将订单标记为支付成功
+#[allow(dead_code)]
+async fn mock_pay_order(State(state): State<AppState>, Path(id): Path<Uuid>) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let result = sqlx::query("UPDATE orders SET status = 'PAID' WHERE id = $1")
+        .bind(id)
+        .execute(&state.db)
+        .await
+        .map_err(|e: sqlx::Error| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if result.rows_affected() == 0 {
+        return Err((StatusCode::NOT_FOUND, "Order not found".to_string()));
+    }
+
+    Ok(Json(serde_json::json!({ "status": "PAID", "mock": true })))
+}
+
 async fn get_employees(claims: Claims, State(state): State<AppState>) -> Result<Json<Vec<Employee>>, (StatusCode, String)> {
     println!("Auth user: {}", claims.sub);
     let employees = sqlx::query_as::<_, Employee>("SELECT id, name, wallet_address, salary_amount, role FROM employees")
@@ -128,7 +166,7 @@ async fn get_employees(claims: Claims, State(state): State<AppState>) -> Result<
 async fn get_merchant_summary(claims: Claims, State(state): State<AppState>) -> Result<Json<MerchantSummary>, (StatusCode, String)> {
     let merchant_address = claims.sub;
 
-    let row = sqlx::query("SELECT COUNT(*) as count, COALESCE(SUM(amount), 0) as total FROM orders WHERE merchant_address = $1 AND status = 'PAID'")
+    let row = sqlx::query("SELECT COUNT(*) as count, COALESCE(SUM(amount), 0)::BIGINT as total FROM orders WHERE merchant_address = $1 AND status = 'PAID'")
         .bind(&merchant_address)
         .fetch_one(&state.db)
         .await

@@ -1,10 +1,10 @@
 [package]
 name = "suipay"
 version = "0.0.1"
-edition = "2024.beta"
+edition = "2024"
 
 [dependencies]
-Sui = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-framework", rev = "framework/testnet" }
+Sui = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-framework", rev = "testnet-v1.52.1" }
 # 🔴 假设 StableLayer 的合约地址如下
 # StableLayer = { git = "https://github.com/StableLayer/stable-layer-protocol.git", subdir = "move/stable_layer", rev = "main" }
 

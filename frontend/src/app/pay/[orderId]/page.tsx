@@ -90,13 +90,37 @@ export default function CheckoutPage({ params }: { params: { orderId: string } }
     try {
       const tx = new Transaction();
       
-      // ✨ 直接使用后端的 raw amount，无需再计算精度，避免重复转换误差
-      const amountInt = BigInt(orderData.amount);
-      
-      const [coin] = tx.splitCoins(tx.gas, [tx.pure.u64(amountInt)]);
-      tx.transferObjects([coin], tx.pure.address(orderData.merchantAddress));
+      if (swapRoute) {
+        // Case A: Swap required (e.g. SUI -> USDC)
+        console.log('Executing Cetus Swap...');
+        
+        // 1. Get required input amount from route
+        const amountInInt = BigInt(swapRoute.amountIn.toString());
+        
+        // 2. Split SUI coin from gas
+        const [inputCoin] = tx.splitCoins(tx.gas, [tx.pure.u64(amountInInt)]);
+        
+        // 3. Build PTB with Cetus SDK
+        // This performs swap and transfers output coin to merchant
+        await buildSwapAndPayTx(tx, swapRoute, inputCoin, orderData.merchantAddress);
+        
+      } else if (payWithToken === SUI_COIN_TYPE && orderData.currency !== 'SUI') {
+         // Fallback safety check
+         throw new Error("Unable to fetch swap route. Please try refreshing.");
+      } else {
+        // Case B: Direct Payment (e.g. SUI -> SUI)
+        // Only supports SUI direct payment for now as we use tx.gas
+        if (payWithToken !== SUI_COIN_TYPE) {
+             throw new Error("Direct token payment (non-SUI) is not supported in this demo. Please use SUI.");
+        }
+        
+        console.log('Executing Direct Payment...');
+        const amountInt = BigInt(orderData.amount);
+        const [coin] = tx.splitCoins(tx.gas, [tx.pure.u64(amountInt)]);
+        tx.transferObjects([coin], tx.pure.address(orderData.merchantAddress));
+      }
 
-      // 1. 执行链上交易
+      // 4. Execute transaction
       const response = await signAndExecute({ transaction: tx });
       console.log('Transaction Digest:', response.digest);
 
@@ -109,7 +133,8 @@ export default function CheckoutPage({ params }: { params: { orderId: string } }
         attempts++;
         await new Promise(r => setTimeout(r, 2000)); // 每 2 秒查一次
         
-        const checkRes = await fetch(`http://localhost:3001/orders/${params.orderId}`);
+        const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+        const checkRes = await fetch(`${apiUrl}/orders/${params.orderId}`);
         const statusData = await checkRes.json();
         
         if (statusData.status === 'PAID') {
@@ -254,20 +279,39 @@ export default function CheckoutPage({ params }: { params: { orderId: string } }
                     </div>
                   </div>
                 ) : (
-                  <button
-                    onClick={handlePay}
-                    disabled={isProcessing}
-                    className="w-full py-5 bg-blue-600 text-white rounded-2xl font-bold text-lg shadow-xl shadow-blue-200 hover:bg-blue-700 transition-all flex items-center justify-center gap-3"
-                  >
-                    {isProcessing ? (
-                      <>
-                        <Loader2 className="animate-spin" />
-                        Confirming on Sui...
-                      </>
-                    ) : (
-                      'Pay Now'
+                  <div className="space-y-3">
+                    <button
+                        onClick={handlePay}
+                        disabled={isProcessing}
+                        className="w-full py-5 bg-blue-600 text-white rounded-2xl font-bold text-lg shadow-xl shadow-blue-200 hover:bg-blue-700 transition-all flex items-center justify-center gap-3"
+                    >
+                        {isProcessing ? (
+                        <>
+                            <Loader2 className="animate-spin" />
+                            Confirming on Sui...
+                        </>
+                        ) : (
+                        'Pay Now'
+                        )}
+                    </button>
+                    
+                    {/* ✨ 仅开发环境可见的模拟支付按钮 */}
+                    {process.env.NODE_ENV === 'development' && (
+                        <button
+                            onClick={async () => {
+                                if(!confirm("Simulate successful payment? (Dev only)")) return;
+                                setIsProcessing(true);
+                                try {
+                                    const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+                                    await fetch(`${apiUrl}/orders/${params.orderId}/mock-pay`, { method: 'POST' });
+                                } catch(e) { console.error(e); }
+                            }}
+                            className="w-full py-3 bg-slate-100 text-slate-500 rounded-xl font-bold text-sm hover:bg-slate-200 transition-all"
+                        >
+                            🛠️ Simulate Payment (Dev Only)
+                        </button>
                     )}
-                  </button>
+                  </div>
                 )}
               </div>
             ) : (

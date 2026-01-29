@@ -24,7 +24,9 @@ pub struct Claims {
 #[derive(Debug, Deserialize)]
 pub struct LoginRequest {
     pub address: String,
+    #[allow(dead_code)]
     pub signature: String,
+    #[allow(dead_code)]
     pub message: String,
 }
 
@@ -41,7 +43,9 @@ pub struct LoginResponse {
 
 pub enum AuthError {
     InvalidToken,
+    #[allow(dead_code)]
     MissingCredentials,
+    #[allow(dead_code)]
     ZkLoginError(String),
 }
 

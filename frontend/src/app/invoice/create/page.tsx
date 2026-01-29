@@ -3,7 +3,8 @@
 import { useState } from 'react';
 import { useCurrentAccount, useSignAndExecuteTransaction } from '@mysten/dapp-kit';
 import { Transaction } from '@mysten/sui/transactions';
-import { CreditCard, ArrowLeft, Loader2, CheckCircle2, QrCode, Link as LinkIcon, Share2 } from 'lucide-react';
+import { CreditCard, ArrowLeft, Loader2, CheckCircle2, Link as LinkIcon, Share2 } from 'lucide-react';
+import { QRCodeSVG } from 'qrcode.react';
 import Link from 'next/link';
 
 export default function CreateInvoice() {
@@ -15,6 +16,7 @@ export default function CreateInvoice() {
   const [isPending, setIsPending] = useState(false);
   const [isSuccess, setIsSuccess] = useState(false);
   const [orderId, setOrderId] = useState<string | null>(null);
+  const [isCopied, setIsCopied] = useState(false);
 
   const handleCreate = async () => {
     if (!amount || !account) return;
@@ -22,13 +24,14 @@ export default function CreateInvoice() {
     setIsPending(true);
     
     try {
-      const token = localStorage.getItem('suipay_token');
+      const token = localStorage.getItem('suistream_token');
       if (!token) throw new Error('Not authenticated');
 
       // ✨ 金融级转换：将用户输入的 1.00 转换为 1,000,000 (USDC 6位小数)
       const rawAmount = Math.floor(parseFloat(amount) * 1_000_000);
 
-      const response = await fetch('http://localhost:3001/orders', {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3002';
+      const response = await fetch(`${apiUrl}/orders`, {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
@@ -136,15 +139,28 @@ export default function CreateInvoice() {
 
                 <div className="p-4 bg-slate-50 rounded-2xl border-2 border-dashed border-slate-200">
                   <div className="aspect-square bg-white flex items-center justify-center rounded-xl mb-4">
-                    <QrCode size={180} className="text-slate-800" />
+                    <QRCodeSVG 
+                      value={`${window.location.origin}/pay/${orderId}`}
+                      size={180}
+                      level="H"
+                      className="text-slate-800"
+                    />
                   </div>
                   <p className="text-xs text-slate-400 uppercase tracking-widest font-bold">Scan to Pay</p>
                 </div>
 
                 <div className="flex gap-3">
-                  <button className="flex-1 flex items-center justify-center gap-2 py-3 bg-slate-800 text-white rounded-xl font-bold hover:bg-slate-900 transition-all">
-                    <LinkIcon size={18} />
-                    Copy Link
+                  <button 
+                    onClick={() => {
+                        const link = `${window.location.origin}/pay/${orderId}`;
+                        navigator.clipboard.writeText(link);
+                        setIsCopied(true);
+                        setTimeout(() => setIsCopied(false), 2000);
+                    }}
+                    className="flex-1 flex items-center justify-center gap-2 py-3 bg-slate-800 text-white rounded-xl font-bold hover:bg-slate-900 transition-all"
+                  >
+                    {isCopied ? <CheckCircle2 size={18} /> : <LinkIcon size={18} />}
+                    {isCopied ? 'Copied!' : 'Copy Link'}
                   </button>
                   <button className="p-3 bg-slate-100 text-slate-600 rounded-xl hover:bg-slate-200 transition-all">
                     <Share2 size={18} />

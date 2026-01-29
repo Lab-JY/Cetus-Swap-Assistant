@@ -22,7 +22,8 @@ export default function AuthCallback() {
 
       try {
         // 2. 将 JWT 发给后端进行验证并派生 Sui 地址
-        const res = await fetch('http://localhost:3001/auth/zklogin/verify', {
+        const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3002';
+        const res = await fetch(`${apiUrl}/auth/zklogin/verify`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ jwt: idToken }),
@@ -33,8 +34,8 @@ export default function AuthCallback() {
         const data = await res.json();
         
         // 3. 存储返回的正式 JWT 和 Sui 地址
-        localStorage.setItem('suipay_token', data.token);
-        localStorage.setItem('suipay_address', data.sui_address);
+        localStorage.setItem('suistream_token', data.token);
+        localStorage.setItem('suistream_address', data.sui_address);
         
         setStatus('Login Successful! Redirecting...');
         
