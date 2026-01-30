@@ -178,6 +178,24 @@ public fun get_registry_stats(registry: &SwapRegistry): (u64, u64) {
     (registry.total_swaps, registry.total_volume)
 }
 
+/// Record a swap event (called after swap is completed)
+public entry fun record_swap_event(
+    from_coin: ascii::String,
+    to_coin: ascii::String,
+    amount_in: u64,
+    amount_out: u64,
+    ctx: &mut sui::tx_context::TxContext
+) {
+    event::emit(SwapEvent {
+        user: tx_context::sender(ctx),
+        from_coin,
+        to_coin,
+        amount_in,
+        amount_out,
+        timestamp: tx_context::epoch(ctx),
+    });
+}
+
 /// Legacy function for backward compatibility
 public entry fun transfer_with_event<T>(
     coin: Coin<T>,

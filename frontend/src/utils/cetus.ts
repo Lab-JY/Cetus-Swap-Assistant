@@ -320,3 +320,34 @@ export function getTokenSymbol(coinType: string): string {
     if (coinType.includes('::idol_dgran')) return 'IDOL_DGRAN';
     return 'UNKNOWN';
 }
+
+// 📝 Record swap event on-chain
+export async function recordSwapEvent(
+    suiClient: any,
+    fromCoin: string,
+    toCoin: string,
+    amountIn: string,
+    amountOut: string
+): Promise<string> {
+    try {
+        console.log('📝 Recording swap event on-chain...');
+
+        const tx = new Transaction();
+
+        // Call record_swap_event function
+        tx.moveCall({
+            target: `${CETUS_SWAP_PACKAGE_ID}::swap_helper::record_swap_event`,
+            arguments: [
+                tx.pure.string(fromCoin),
+                tx.pure.string(toCoin),
+                tx.pure.u64(amountIn),
+                tx.pure.u64(amountOut),
+            ],
+        });
+
+        return tx.serialize();
+    } catch (error) {
+        console.error('❌ Error recording swap event:', error);
+        throw error;
+    }
+}
