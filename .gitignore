@@ -15,4 +15,7 @@ backend/.env
 Thumbs.db
 
 # Sui build artifacts
-contracts/suipay/build/
+contracts/*/build/
+contracts/**/build/
+*.mv
+*.mvsm
