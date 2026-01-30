@@ -33,9 +33,9 @@ export const TOKENS = SUI_NETWORK === 'mainnet' ? MAINNET_TOKENS : TESTNET_TOKEN
 // 🏊 Pool Configuration
 export const POOL_IDS = {
     mainnet: {
-        SUI_USDC: '0xcf994611fd4c48e277ce3ffd4d4364c914af2c3cbb05f7bf6facd371de688630'
+        SUI_USDC: '' // Leave empty to force dynamic discovery
     },
     testnet: {
-        SUI_USDC: '0x2e041f3fd93646dcc877f783c1f2b7fa62d30271bdef1f21ef002cebf857bded' // Cetus SUI-USDC Testnet Pool
+        SUI_USDC: '' // Leave empty to force dynamic discovery via SDK
     }
 };

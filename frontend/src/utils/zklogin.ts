@@ -4,7 +4,7 @@ import { generateNonce, generateRandomness } from '@mysten/zklogin';
 // ⚠️ Replace with your actual Google Client ID
 // For local dev (localhost:3000), you can use this demo ID or create your own at console.cloud.google.com
 export const GOOGLE_CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || '25769832374-famec85nbqn6hskd94n6d846g4869051.apps.googleusercontent.com'; 
-export const REDIRECT_URI = `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/auth/callback`;
+export const REDIRECT_URI = `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3001'}/auth/callback`;
 
 export const KEY_PAIR_SESSION_KEY = 'zklogin_ephemeral_key';
 export const RANDOMNESS_SESSION_KEY = 'zklogin_randomness';
