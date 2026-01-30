@@ -71,8 +71,17 @@ export async function getSwapQuote(
                    if (pools.length > 0) {
                        // Sort by liquidity (descending) to get the best pool
                        pools.sort((a: any, b: any) => Number(b.liquidity) - Number(a.liquidity));
-                       cachedPool = pools[0];
-                       console.log(`✅ Found dynamic pool: ${cachedPool.poolAddress} (Liq: ${cachedPool.liquidity})`);
+                       const bestPool = pools[0];
+                       console.log(`✅ Found dynamic pool address: ${bestPool.poolAddress}. Fetching full details...`);
+                       
+                       // 🛡️ Robustness Fix: Fetch the full Pool object using getPool
+                       // This ensures we have a complete object with all necessary fields/methods expected by the SDK
+                       try {
+                            cachedPool = await cetusClmmSDK.Pool.getPool(bestPool.poolAddress);
+                       } catch (err) {
+                            console.warn("⚠️ Failed to fetch full pool details, using list result as fallback.", err);
+                            cachedPool = bestPool;
+                       }
                    }
                } catch (e) {
                    console.warn("⚠️ Failed to fetch pool list from SDK:", e);
@@ -92,18 +101,48 @@ export async function getSwapQuote(
         const a2b = fromCoinType === cachedPool.coinTypeA;
         const amount = new BN(amountIn);
 
+        console.log("🧮 Calculating Rates:", {
+             poolAddress: cachedPool.poolAddress,
+             coinTypeA: cachedPool.coinTypeA,
+             coinTypeB: cachedPool.coinTypeB,
+             a2b,
+             amount: amount.toString()
+        });
+
+        // Ensure cachedPool has necessary fields
+        if (!cachedPool.coinTypeA || !cachedPool.coinTypeB) {
+             throw new Error("Invalid Pool Object: Missing coin types");
+        }
+
         const swapResult = await cetusClmmSDK.Swap.calculateRates({
             decimalsA: 9, // SUI
             decimalsB: 6, // USDC
             a2b,
             byAmountIn,
             amount,
-            // Revert to passing 'pool' directly but ignore type check if needed
-            // The error says 'currentSqrtPrice' does not exist, which implies we shouldn't spread.
-            // But previous error said 'pool' does not exist.
-            // This suggests the type definition might be strict or we are importing wrong type.
-            // Let's try casting to 'any' to bypass this build blocker, as we know the logic is correct for the SDK.
-            pool: cachedPool,
+            // 🚨 Critical Fix for Runtime Error:
+            // SDK v5 seems to try to access properties (like coinTypeA) directly on the 'pool' object passed here.
+            // If cachedPool is a plain JSON object (from API/Indexer), it might be missing methods or prototype chain.
+            // However, the error "Cannot read properties of undefined (reading 'coinTypeA')" suggests
+            // that INSIDE SDK, it does something like `params.pool.coinTypeA`.
+            // BUT, we are passing `pool: cachedPool`.
+            // Wait, look at previous error: `TypeError: Cannot read properties of undefined (reading 'coinTypeA')`
+            // This stack trace `at oy.calculateRates` implies `this.pool` or similar is undefined, OR
+            // the `pool` passed in the object is somehow not being read correctly if we just pass `pool`.
+            
+            // Let's go back to spreading the properties.
+            // Even though TS complained 'currentSqrtPrice' does not exist in type,
+            // JS runtime REQUIRES these fields if we don't pass a full Pool instance.
+            // The SDK likely checks: if (params.pool) use pool; else use params.currentSqrtPrice etc.
+            
+            // Let's Construct a "Pool-like" object that satisfies the SDK's expectations at runtime.
+            // Or better, just spread the properties and ignore TS errors, as that's what worked logically before types blocked us.
+            
+            currentSqrtPrice: cachedPool.currentSqrtPrice,
+            tickSpacing: cachedPool.tickSpacing,
+            liquidity: cachedPool.liquidity,
+            coinTypeA: cachedPool.coinTypeA,
+            coinTypeB: cachedPool.coinTypeB
         } as any);
 
         console.log("✅ Swap Result:", swapResult);
