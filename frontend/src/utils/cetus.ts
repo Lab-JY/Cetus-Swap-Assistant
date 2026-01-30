@@ -10,7 +10,11 @@ export { SUI_NETWORK }; // Re-export for frontend use
 // 🌟 Initialize Cetus Aggregator SDK
 const aggregator = new AggregatorClient({
     endpoint: SUI_NETWORK === 'mainnet' ? 'https://api-sui.cetus.zone/router_v3/find_routes' : undefined,
-    env: SUI_NETWORK === 'mainnet' ? Env.Mainnet : Env.Testnet
+    env: SUI_NETWORK === 'mainnet' ? Env.Mainnet : Env.Testnet,
+    pythUrls: [
+        'https://hermes.pyth.network',
+        'https://hermes-beta.pyth.network'
+    ]
 });
 
 // 🌟 Initialize Cetus CLMM SDK (Fallback)
@@ -26,37 +30,68 @@ export const WUSDC_COIN_TYPE = TOKENS.wUSDC;
 export async function getSwapQuote(
     fromCoinType: string,
     toCoinType: string,
-    amountIn: number, 
+    amountIn: number,
+    userAddress: string,
     byAmountIn: boolean = true
 ) {
     console.log(`🔍 Quote: ${amountIn} ${fromCoinType} -> ${toCoinType}`);
     const amount = new BN(amountIn);
 
+    // Set sender address for CLMM SDK
+    if (userAddress) {
+        cetusClmm.senderAddress = userAddress;
+    }
+
     try {
         // 1️⃣ Try Aggregator First (Only on Mainnet)
-        // The Aggregator SDK v1.4.3 currently throws "CetusRouter only supported on mainnet" 
+        // The Aggregator SDK v1.4.3 currently throws "CetusRouter only supported on mainnet"
         // when executing routerSwap on Testnet. So we skip it on Testnet.
         if (SUI_NETWORK === 'mainnet') {
             console.log("Trying Aggregator...");
-            const router = await aggregator.findRouters({
+            const routerData = await aggregator.findRouters({
                 from: fromCoinType,
                 target: toCoinType,
                 amount: amount,
                 byAmountIn: byAmountIn,
             });
 
-            if (router) {
-                console.log("✅ Aggregator Route Found:", {
-                    amountOut: router.amountOut.toString(),
-                    splitPaths: router.paths?.length
+            if (routerData && routerData.paths && routerData.paths.length > 0) {
+                console.log("✅ Aggregator Routes Found:", {
+                    totalPaths: routerData.paths.length,
+                    bestAmountOut: routerData.amountOut.toString()
                 });
+
+                // RouterDataV3 returns paths as a flat array, we need to group them into routes
+                // For now, treat each path as a separate route option
+                const routes = routerData.paths.map((path: any, idx: number) => {
+                    return {
+                        id: idx,
+                        amountOut: new BN(path.amountOut),
+                        estimatedFee: 0,
+                        router: { path: [path] },
+                        source: 'aggregator',
+                        pathSteps: [{
+                            from: path.from,
+                            to: path.target,
+                            provider: path.provider,
+                            feeRate: path.feeRate,
+                            amountIn: path.amountIn,
+                            amountOut: path.amountOut
+                        }],
+                        hopCount: 1,
+                        rawSwapResult: { path: [path] }
+                    };
+                });
+
                 return {
-                    amountOut: router.amountOut,
+                    amountOut: routerData.amountOut,
                     estimatedFee: 0,
-                    router: router, 
+                    router: routerData,
                     source: 'aggregator',
-                    paths: router.paths ? router.paths.map((r: any) => ({ label: `Path`, steps: [] })) : [],
-                    rawSwapResult: router
+                    routes: routes,
+                    selectedRouteId: 0, // Default to best route
+                    rawSwapResult: routerData,
+                    fullRouterData: routerData // Store full routerData for SDK
                 };
             }
         } else {
@@ -69,26 +104,63 @@ export async function getSwapQuote(
     // 2️⃣ Fallback to Direct Pool (CLMM)
     try {
         console.log("Trying Direct Pool Fallback...");
-        // Identify Pool ID based on token pair (Simplified for SUI-USDC demo)
+        // Identify Pool ID based on token pair
         let poolAddress = '';
-        if ((fromCoinType === TOKENS.SUI && toCoinType === TOKENS.USDC) || 
+        const network = SUI_NETWORK === 'mainnet' ? 'mainnet' : 'testnet';
+        const pools = POOL_IDS[network];
+
+        // Check for SUI-USDC pair (Mainnet)
+        if ((fromCoinType === TOKENS.SUI && toCoinType === TOKENS.USDC) ||
             (fromCoinType === TOKENS.USDC && toCoinType === TOKENS.SUI)) {
-            poolAddress = POOL_IDS[SUI_NETWORK === 'mainnet' ? 'mainnet' : 'testnet'].SUI_USDC;
+            poolAddress = (pools as any).SUI_USDC;
+        }
+        // Check for SUI-CETUS pair (Mainnet)
+        else if ((fromCoinType === TOKENS.SUI && toCoinType === TOKENS.CETUS) ||
+                 (fromCoinType === TOKENS.CETUS && toCoinType === TOKENS.SUI)) {
+            poolAddress = (pools as any).SUI_CETUS;
+        }
+        // Check for USDC-CETUS pair (Mainnet)
+        else if ((fromCoinType === TOKENS.USDC && toCoinType === TOKENS.CETUS) ||
+                 (fromCoinType === TOKENS.CETUS && toCoinType === TOKENS.USDC)) {
+            poolAddress = (pools as any).USDC_CETUS;
+        }
+        // Check for SUI-MEME pair (Testnet)
+        else if ((fromCoinType === TOKENS.SUI && toCoinType === (TOKENS as any).MEME) ||
+                 (fromCoinType === (TOKENS as any).MEME && toCoinType === TOKENS.SUI)) {
+            poolAddress = (pools as any).SUI_MEME;
+        }
+        // Check for SUI-IDOL_APPLE pair (Testnet)
+        else if ((fromCoinType === TOKENS.SUI && toCoinType === (TOKENS as any).IDOL_APPLE) ||
+                 (fromCoinType === (TOKENS as any).IDOL_APPLE && toCoinType === TOKENS.SUI)) {
+            poolAddress = (pools as any).SUI_IDOL_APPLE;
+        }
+        // Check for SUI-IDOL_DGRAN pair (Testnet)
+        else if ((fromCoinType === TOKENS.SUI && toCoinType === (TOKENS as any).IDOL_DGRAN) ||
+                 (fromCoinType === (TOKENS as any).IDOL_DGRAN && toCoinType === TOKENS.SUI)) {
+            poolAddress = (pools as any).SUI_IDOL_DGRAN;
         }
 
         if (!poolAddress) {
+            const errorMsg = "This token pair is not supported. Please select a different pair.";
             console.error("❌ No direct pool configured for this pair.");
-            return null;
+            return {
+                error: true,
+                errorMessage: errorMsg,
+                source: 'error'
+            };
         }
 
         const pool = await cetusClmm.Pool.getPool(poolAddress);
+        // Determine a2b based on actual pool structure
+        const a2b = fromCoinType === pool.coinTypeA;
+
         // Use preswap which handles tick fetching or simple estimation
         const res = await cetusClmm.Swap.preswap({
             pool: pool,
             currentSqrtPrice: pool.current_sqrt_price,
             decimalsA: 9,
             decimalsB: 6,
-            a2b: fromCoinType === TOKENS.SUI,
+            a2b: a2b,
             byAmountIn: byAmountIn,
             amount: amount.toString(),
             coinTypeA: pool.coinTypeA,
@@ -96,8 +168,13 @@ export async function getSwapQuote(
         });
 
         if (!res) {
+            const errorMsg = "Failed to get quote for this pair. Please try again.";
             console.error("❌ Direct Pool Quote returned null");
-            return null;
+            return {
+                error: true,
+                errorMessage: errorMsg,
+                source: 'error'
+            };
         }
 
         console.log("✅ Direct Pool Quote Found:", res.estimatedAmountOut.toString());
@@ -108,19 +185,24 @@ export async function getSwapQuote(
             router: null,
             source: 'clmm',
             poolAddress: poolAddress,
-            a2b: fromCoinType === TOKENS.SUI,
+            a2b: a2b,
             paths: [{ label: 'Direct Pool', steps: [] }],
             rawSwapResult: res
         };
 
     } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : "Failed to get quote. Please try again.";
         console.error("❌ Error finding direct quote:", error);
-        return null;
+        return {
+            error: true,
+            errorMessage: errorMsg,
+            source: 'error'
+        };
     }
 }
 
 export async function buildSimpleSwapTx(
-    tx: Transaction,
+    tx: Transaction | null,
     quote: any,
     inputCoin: any,
     userAddress: string,
@@ -132,7 +214,10 @@ export async function buildSimpleSwapTx(
     console.log(`🏗️ Building Swap Transaction via ${quote.source === 'aggregator' ? 'Aggregator' : 'CLMM'}...`);
 
     if (quote.source === 'aggregator') {
+        if (!tx) throw new Error("Transaction object required for Aggregator mode");
         const { router } = quote;
+        // Set sender address on transaction for Aggregator SDK
+        tx.setSender(userAddress);
         await aggregator.routerSwap({
             router: router,
             txb: tx as any,
@@ -141,7 +226,7 @@ export async function buildSimpleSwapTx(
         });
         return tx;
     } else {
-        // CLMM Direct Swap
+        // CLMM Direct Swap - creates its own transaction
         const pool = await cetusClmm.Pool.getPool(quote.poolAddress);
         const toAmount = new BN(quote.amountOut);
         const amountLimit = adjustForSlippage(toAmount, slippage, !quote.a2b);
@@ -152,7 +237,7 @@ export async function buildSimpleSwapTx(
             a2b: quote.a2b,
             by_amount_in: quote.rawSwapResult.byAmountIn,
             amount: quote.rawSwapResult.amount,
-            amount_limit: amountLimit.toString(), 
+            amount_limit: amountLimit.toString(),
             coinTypeA: pool.coinTypeA,
             coinTypeB: pool.coinTypeB,
         });
@@ -163,9 +248,11 @@ export async function buildSimpleSwapTx(
 function adjustForSlippage(amount: BN, slippage: number, isMax: boolean): BN {
     const slippageBN = new BN(Math.floor(slippage * 10000));
     const base = new BN(10000);
+    // isMax=true: minimum output (reduce by slippage for safety)
+    // isMax=false: maximum input (increase by slippage for safety)
     if (isMax) {
-        return amount.mul(base.add(slippageBN)).div(base);
-    } else {
         return amount.mul(base.sub(slippageBN)).div(base);
+    } else {
+        return amount.mul(base.add(slippageBN)).div(base);
     }
 }

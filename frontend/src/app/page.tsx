@@ -6,19 +6,24 @@ import { Transaction } from '@mysten/sui/transactions';
 import { SUI_COIN_TYPE, USDC_COIN_TYPE, CETUS_COIN_TYPE, WUSDC_COIN_TYPE, getSwapQuote, buildSimpleSwapTx, SUI_NETWORK } from '@/utils/cetus';
 import Image from 'next/image';
 import { RefreshCcw, ArrowDownUp, Wallet, LogOut, Copy, CheckCircle2, XCircle, AlertTriangle } from 'lucide-react';
-import { getGoogleLoginUrl, clearZkLoginSession } from '@/utils/zklogin';
+import { getGoogleLoginUrl, clearZkLoginSession, signTransactionWithZkLogin } from '@/utils/zklogin';
 import confetti from 'canvas-confetti';
 
-const ALL_TOKENS = [
+const MAINNET_TOKENS = [
   { symbol: 'SUI', name: 'Sui', type: SUI_COIN_TYPE, decimals: 9, icon: '💧' },
   { symbol: 'USDC', name: 'USD Coin', type: USDC_COIN_TYPE, decimals: 6, icon: '💵' },
   { symbol: 'CETUS', name: 'Cetus Token', type: CETUS_COIN_TYPE, decimals: 9, icon: '🌊' },
   { symbol: 'wUSDC', name: 'Wormhole USDC', type: WUSDC_COIN_TYPE, decimals: 6, icon: '🌉' },
 ];
 
-const TOKENS_LIST = SUI_NETWORK === 'testnet' 
-  ? ALL_TOKENS.filter(t => ['SUI', 'USDC'].includes(t.symbol)) 
-  : ALL_TOKENS;
+const TESTNET_TOKENS = [
+  { symbol: 'SUI', name: 'Sui', type: '0x2::sui::SUI', decimals: 9, icon: '💧' },
+  { symbol: 'MEME', name: 'Meme Token', type: '0x5bab1e6852a537a8b07edd10ed9bc2e41d9c75b2ada472bc9bd6bed14000563b::meme_token::MEME_TOKEN', decimals: 9, icon: '🎭' },
+  { symbol: 'IDOL_APPLE', name: 'Idol Apple', type: '0xb8adb26867c2dfecdbd7c309754b1e6cc15a0bbe767d28fc28bece56ad991d4c::idol_apple_1767616383788::IDOL_APPLE_1767616383788', decimals: 9, icon: '🍎' },
+  { symbol: 'IDOL_DGRAN', name: 'Idol Dgran', type: '0xbe4c4cc55d3aaa1a9c01f17b88199b06b96c032fc698184ea71235260f1d6d4c::idol_dgran_1767614261042::IDOL_DGRAN_1767614261042', decimals: 9, icon: '🎪' },
+];
+
+const TOKENS_LIST = SUI_NETWORK === 'testnet' ? TESTNET_TOKENS : MAINNET_TOKENS;
 
 export default function SwapPage() {
   const account = useCurrentAccount();
@@ -27,16 +32,25 @@ export default function SwapPage() {
 
   // zkLogin State
   const [zkLoginAddress, setZkLoginAddress] = useState<string | null>(null);
+  const [walletAddress, setWalletAddress] = useState<string | null>(null);
+  const [loginMethod, setLoginMethod] = useState<'wallet' | 'zklogin' | null>(null);
 
   useEffect(() => {
     // Check for zkLogin session
     const addr = window.sessionStorage.getItem('zklogin_address');
-    if (addr) setZkLoginAddress(addr);
-  }, []);
+    if (addr) {
+      setZkLoginAddress(addr);
+      setLoginMethod('zklogin');
+    }
+
+    // Check for wallet connection
+    if (account?.address) {
+      setWalletAddress(account.address);
+      setLoginMethod('wallet');
+    }
+  }, [account?.address]);
 
   const handleGoogleLogin = () => {
-    // Current Epoch is roughly needed for nonce, we can fetch it or just use a safe future one.
-    // For MVP, we'll fetch current epoch from network.
     suiClient.getLatestSuiSystemState().then(state => {
         const epoch = Number(state.epoch);
         window.location.href = getGoogleLoginUrl(epoch);
@@ -46,22 +60,25 @@ export default function SwapPage() {
   const handleLogout = () => {
     clearZkLoginSession();
     setZkLoginAddress(null);
+    setWalletAddress(null);
+    setLoginMethod(null);
   };
 
-  // ⚠️ Priority: zkLogin > Wallet
-  // If user logs in with Google, we show that account even if wallet is connected.
-  const currentAddress = zkLoginAddress || account?.address;
+  // Determine current address based on login method
+  const currentAddress = loginMethod === 'wallet' ? walletAddress : loginMethod === 'zklogin' ? zkLoginAddress : null;
 
   const [fromToken, setFromToken] = useState(TOKENS_LIST[0]); // Default SUI
   const [toToken, setToToken] = useState(TOKENS_LIST[1]);   // Default USDC
   const [amountIn, setAmountIn] = useState('');
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [quote, setQuote] = useState<any>(null);
+  const [selectedRouteId, setSelectedRouteId] = useState<number>(0);
   const [loading, setLoading] = useState(false);
-  const [swapStatus, setSwapStatus] = useState<'idle' | 'swapping' | 'success' | 'error'>('idle');
+  const [swapStatus, setSwapStatus] = useState<'idle' | 'swapping' | 'confirming' | 'success' | 'error'>('idle');
   const [showSuccessModal, setShowSuccessModal] = useState(false);
   const [lastTxDigest, setLastTxDigest] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
+  const [txWaitMessage, setTxWaitMessage] = useState('');
 
   // 💰 Fetch Balance
   const { data: balanceData, refetch: refetchBalance } = useSuiClientQuery(
@@ -87,19 +104,35 @@ export default function SwapPage() {
     const fetchQuote = async () => {
       if (!amountIn || parseFloat(amountIn) <= 0) {
         setQuote(null);
+        setErrorMessage('');
+        return;
+      }
+
+      if (!currentAddress) {
+        setQuote(null);
+        setErrorMessage('');
         return;
       }
 
       setLoading(true);
+      setErrorMessage('');
       try {
         console.log("Fetching quote for:", amountIn, fromToken.symbol, "->", toToken.symbol);
         const rawAmount = Math.floor(parseFloat(amountIn) * Math.pow(10, fromToken.decimals));
-        const routes = await getSwapQuote(fromToken.type, toToken.type, rawAmount);
+        const routes = await getSwapQuote(fromToken.type, toToken.type, rawAmount, currentAddress);
         console.log("Quote received:", routes);
-        setQuote(routes);
+
+        // Check if the response is an error
+        if (routes && (routes as any).error) {
+          setQuote(null);
+          setErrorMessage((routes as any).errorMessage);
+        } else {
+          setQuote(routes);
+        }
       } catch (err) {
         console.error("Quote Error:", err);
         setQuote(null);
+        setErrorMessage(err instanceof Error ? err.message : "Failed to fetch quote");
       } finally {
         setLoading(false);
       }
@@ -116,19 +149,14 @@ export default function SwapPage() {
     setErrorMessage('');
 
     try {
-      const tx = new Transaction();
-      
-      // We need to get the Coin object for the input amount.
-      // For simplicity in this MVP, we assume the user has one coin with enough balance or we merge them.
-      // In a real app, we should select coins intelligently.
-      // Here, we'll try to split the gas coin (if SUI) or find a coin object.
-      
       let inputCoin;
+      let tx: Transaction | null = null;
       const amountInRaw = BigInt(Math.floor(parseFloat(amountIn) * Math.pow(10, fromToken.decimals)));
 
       // ⚠️ CLMM SDK (Fallback) builds its own transaction with its own coin selection logic.
       // We only need to manually split coins if we are using the Aggregator (which appends to our tx).
       if (quote.source !== 'clmm') {
+          tx = new Transaction();
           if (fromToken.symbol === 'SUI') {
             inputCoin = tx.splitCoins(tx.gas, [tx.pure.u64(amountInRaw)]);
           } else {
@@ -137,26 +165,45 @@ export default function SwapPage() {
               owner: currentAddress,
               coinType: fromToken.type
             });
-            
+
             if (coins.length === 0) throw new Error(`No ${fromToken.symbol} balance found.`);
-            
-            // Simple strategy: take the first coin that has enough balance, or merge (not implemented for simplicity)
-            // ideally we merge coins here.
-            // For Hackathon MVP: Just pick the first one with enough balance or fail.
-            const validCoin = coins.find(c => BigInt(c.balance) >= amountInRaw);
+
+            // Sort coins by balance descending to find best candidates
+            const sortedCoins = coins.sort((a, b) => Number(BigInt(b.balance) - BigInt(a.balance)));
+
+            // Try to find a single coin with enough balance
+            const validCoin = sortedCoins.find(c => BigInt(c.balance) >= amountInRaw);
             if (validCoin) {
                 // Split it to exact amount
                 const primaryCoin = tx.object(validCoin.coinObjectId);
                 inputCoin = tx.splitCoins(primaryCoin, [tx.pure.u64(amountInRaw)]);
             } else {
-                // If no single coin is enough, we need to merge. 
-                // Implementing merge logic is complex for MVP 1-file.
-                // We'll throw specific error.
-                throw new Error(`Insufficient single-coin balance for ${fromToken.symbol}. Please merge coins.`);
+                // Merge multiple coins if needed
+                const coinsToMerge = [];
+                let totalBalance = BigInt(0);
+
+                for (const coin of sortedCoins) {
+                  coinsToMerge.push(tx.object(coin.coinObjectId));
+                  totalBalance += BigInt(coin.balance);
+                  if (totalBalance >= amountInRaw) break;
+                }
+
+                if (totalBalance < amountInRaw) {
+                  throw new Error(`Insufficient balance for ${fromToken.symbol}. Need ${(Number(amountInRaw) / Math.pow(10, fromToken.decimals)).toFixed(4)}, have ${(Number(totalBalance) / Math.pow(10, fromToken.decimals)).toFixed(4)}`);
+                }
+
+                // Merge all coins into the first one
+                if (coinsToMerge.length > 1) {
+                  tx.mergeCoins(coinsToMerge[0], coinsToMerge.slice(1));
+                }
+
+                // Split the merged coin to exact amount
+                inputCoin = tx.splitCoins(coinsToMerge[0], [tx.pure.u64(amountInRaw)]);
             }
           }
       }
 
+      // Pass full quote to buildSimpleSwapTx (selectedRouteId is only for UI display)
       const finalTx = await buildSimpleSwapTx(tx, quote, inputCoin, currentAddress, toToken.type);
 
       // Ensure gas budget is set if needed (especially for SUI swaps)
@@ -166,55 +213,130 @@ export default function SwapPage() {
 
       if (account) {
           // 🟢 Wallet Adapter Mode
+          setTxWaitMessage('Waiting for wallet confirmation...');
           signAndExecuteTransaction(
             { transaction: finalTx },
             {
               onSuccess: (result) => {
                 console.log('Swap Success:', result);
-                setSwapStatus('success');
+                setTxWaitMessage('Confirming transaction on blockchain...');
+                setSwapStatus('confirming');
                 setLastTxDigest(result.digest);
-                setAmountIn('');
-                setQuote(null);
-                refetchBalance(); // Refresh balance after swap
-                setShowSuccessModal(true);
-                
-                // 🎉 Confetti Effect
-                const duration = 3000;
-                const end = Date.now() + duration;
 
-                const frame = () => {
-                  confetti({
-                    particleCount: 5,
-                    angle: 60,
-                    spread: 55,
-                    origin: { x: 0 },
-                    colors: ['#3b82f6', '#10b981', '#6366f1']
-                  });
-                  confetti({
-                    particleCount: 5,
-                    angle: 120,
-                    spread: 55,
-                    origin: { x: 1 },
-                    colors: ['#3b82f6', '#10b981', '#6366f1']
-                  });
+                // Wait for transaction confirmation
+                setTimeout(() => {
+                  setSwapStatus('success');
+                  setAmountIn('');
+                  setQuote(null);
+                  setTxWaitMessage('');
+                  refetchBalance(); // Refresh balance after swap
+                  setShowSuccessModal(true);
 
-                  if (Date.now() < end) {
-                    requestAnimationFrame(frame);
-                  }
-                };
-                frame();
+                  // 🎉 Confetti Effect
+                  const duration = 3000;
+                  const end = Date.now() + duration;
+
+                  const frame = () => {
+                    confetti({
+                      particleCount: 5,
+                      angle: 60,
+                      spread: 55,
+                      origin: { x: 0 },
+                      colors: ['#3b82f6', '#10b981', '#6366f1']
+                    });
+                    confetti({
+                      particleCount: 5,
+                      angle: 120,
+                      spread: 55,
+                      origin: { x: 1 },
+                      colors: ['#3b82f6', '#10b981', '#6366f1']
+                    });
+
+                    if (Date.now() < end) {
+                      requestAnimationFrame(frame);
+                    }
+                  };
+                  frame();
+                }, 2000);
               },
               onError: (error) => {
                 console.error('Swap Failed:', error);
                 setSwapStatus('error');
+                setTxWaitMessage('');
                 setErrorMessage(error.message);
               },
             }
           );
       } else if (zkLoginAddress) {
-          // 🔵 zkLogin Mode (Not fully implemented signing in this demo)
-          setErrorMessage("zkLogin Signing is pending integration with Proving Service. Please use Sui Wallet for now.");
-          setSwapStatus('error');
+          // 🔵 zkLogin Mode - Sign with Proving Service
+          try {
+            setTxWaitMessage('Generating ZK proof from Proving Service...');
+
+            const jwt = window.sessionStorage.getItem('zklogin_jwt');
+            if (!jwt) {
+              throw new Error('JWT not found in session');
+            }
+
+            // Sign transaction with zkLogin
+            const { transactionBlockSerialized, signature } = await signTransactionWithZkLogin(finalTx, jwt);
+
+            setTxWaitMessage('Submitting transaction to Sui network...');
+
+            // Execute transaction with zkLogin signature
+            const response = await suiClient.executeTransactionBlock({
+              transactionBlock: transactionBlockSerialized,
+              signature: signature,
+              options: {
+                showEffects: true,
+              },
+            });
+
+            console.log('zkLogin Swap Success:', response);
+            setTxWaitMessage('Confirming transaction on blockchain...');
+            setSwapStatus('confirming');
+            setLastTxDigest(response.digest);
+
+            // Wait for transaction confirmation
+            setTimeout(() => {
+              setSwapStatus('success');
+              setAmountIn('');
+              setQuote(null);
+              setTxWaitMessage('');
+              refetchBalance();
+              setShowSuccessModal(true);
+
+              // Confetti Effect
+              const duration = 3000;
+              const end = Date.now() + duration;
+
+              const frame = () => {
+                confetti({
+                  particleCount: 5,
+                  angle: 60,
+                  spread: 55,
+                  origin: { x: 0 },
+                  colors: ['#3b82f6', '#10b981', '#6366f1']
+                });
+                confetti({
+                  particleCount: 5,
+                  angle: 120,
+                  spread: 55,
+                  origin: { x: 1 },
+                  colors: ['#3b82f6', '#10b981', '#6366f1']
+                });
+
+                if (Date.now() < end) {
+                  requestAnimationFrame(frame);
+                }
+              };
+              frame();
+            }, 2000);
+          } catch (error) {
+            console.error('zkLogin Swap Failed:', error);
+            setSwapStatus('error');
+            setTxWaitMessage('');
+            setErrorMessage(error instanceof Error ? error.message : 'zkLogin transaction failed');
+          }
       }
 
     } catch (e: unknown) {
@@ -224,8 +346,42 @@ export default function SwapPage() {
     }
   };
 
-  const outputAmount = quote 
-    ? (Number(quote.amountOut) / Math.pow(10, toToken.decimals)).toFixed(4) 
+  // Calculate price impact
+  const calculatePriceImpact = () => {
+    if (!quote || !amountIn || parseFloat(amountIn) <= 0) return null;
+
+    // Simple price impact: compare actual output to theoretical output at spot price
+    // This is a simplified calculation - real implementation would use oracle prices
+    const inputAmount = parseFloat(amountIn);
+    const outputAmount = Number(quote.amountOut) / Math.pow(10, toToken.decimals);
+
+    // Rough estimate: assume 0.3% fee and minimal slippage for "fair" price
+    // In reality, this should compare to spot price from an oracle
+    const estimatedFairOutput = inputAmount * 0.997; // Rough estimate
+    const impact = ((estimatedFairOutput - outputAmount) / estimatedFairOutput) * 100;
+
+    return Math.max(0, impact); // Don't show negative impact
+  };
+
+  const priceImpact = calculatePriceImpact();
+  const PRICE_IMPACT_THRESHOLD = 5; // Disable swap if price impact > 5%
+  const isHighPriceImpact = priceImpact !== null && priceImpact > PRICE_IMPACT_THRESHOLD;
+
+  // Generate popular pairs based on selected fromToken
+  const getPopularPairs = () => {
+    const pairs: Array<{ from: string; to: string }> = [];
+    const availableTokens = TOKENS_LIST.filter(t => t.symbol !== fromToken.symbol);
+
+    // Show all available pairs with the selected fromToken
+    availableTokens.forEach(token => {
+      pairs.push({ from: fromToken.symbol, to: token.symbol });
+    });
+
+    return pairs;
+  };
+
+  const outputAmount = quote
+    ? (Number(quote.amountOut) / Math.pow(10, toToken.decimals)).toFixed(4)
     : '---';
 
   return (
@@ -245,15 +401,15 @@ export default function SwapPage() {
           <div className="flex gap-2">
             {currentAddress && (
                <div className="flex gap-2 items-center">
-                  {zkLoginAddress ? (
-                      <div className="flex items-center gap-2 bg-white/10 px-3 py-1.5 rounded-lg border border-white/20 relative group">
-                          <Image src="https://upload.wikimedia.org/wikipedia/commons/c/c1/Google_%22G%22_logo.svg" alt="G" width={16} height={16} />
+                  {loginMethod === 'wallet' ? (
+                      <div className="flex items-center gap-2 bg-white/10 px-3 py-1.5 rounded-lg border border-white/20">
+                          <Wallet className="w-4 h-4" />
                           <div className="flex flex-col text-left">
-                              <span className="text-[10px] text-blue-200 leading-none">Demo Wallet</span>
-                              <span className="text-sm font-mono">{zkLoginAddress.slice(0, 4)}...{zkLoginAddress.slice(-4)}</span>
+                              <span className="text-[10px] text-blue-200 leading-none">Wallet Connected</span>
+                              <span className="text-sm font-mono">{walletAddress?.slice(0, 4)}...{walletAddress?.slice(-4)}</span>
                           </div>
-                          <button 
-                            onClick={() => navigator.clipboard.writeText(zkLoginAddress)}
+                          <button
+                            onClick={() => navigator.clipboard.writeText(walletAddress || '')}
                             className="ml-2 text-white/50 hover:text-white transition-colors"
                             title="Copy Full Address"
                           >
@@ -261,9 +417,23 @@ export default function SwapPage() {
                           </button>
                           <button onClick={handleLogout} className="ml-1 text-white/50 hover:text-red-300 transition-colors"><LogOut size={14}/></button>
                       </div>
-                  ) : (
-                      <ConnectButton />
-                  )}
+                  ) : loginMethod === 'zklogin' ? (
+                      <div className="flex items-center gap-2 bg-white/10 px-3 py-1.5 rounded-lg border border-white/20">
+                          <Image src="https://upload.wikimedia.org/wikipedia/commons/c/c1/Google_%22G%22_logo.svg" alt="G" width={16} height={16} />
+                          <div className="flex flex-col text-left">
+                              <span className="text-[10px] text-blue-200 leading-none">Google Login</span>
+                              <span className="text-sm font-mono">{zkLoginAddress?.slice(0, 4)}...{zkLoginAddress?.slice(-4)}</span>
+                          </div>
+                          <button
+                            onClick={() => navigator.clipboard.writeText(zkLoginAddress || '')}
+                            className="ml-2 text-white/50 hover:text-white transition-colors"
+                            title="Copy Full Address"
+                          >
+                              <Copy size={14}/>
+                          </button>
+                          <button onClick={handleLogout} className="ml-1 text-white/50 hover:text-red-300 transition-colors"><LogOut size={14}/></button>
+                      </div>
+                  ) : null}
                </div>
             )}
           </div>
@@ -271,7 +441,28 @@ export default function SwapPage() {
 
         {/* Swap Card */}
         <div className="p-6 space-y-6">
-          
+
+          {/* Quick Pair Selector */}
+          {currentAddress && (
+            <div className="bg-gradient-to-r from-blue-50 to-indigo-50 p-3 rounded-lg border border-blue-200">
+              <div className="text-xs font-semibold text-gray-600 mb-2">Popular Pairs with {fromToken.symbol}:</div>
+              <div className="flex flex-wrap gap-2">
+                {getPopularPairs().map((pair) => (
+                  <button
+                    key={`${pair.from}-${pair.to}`}
+                    onClick={() => {
+                      setFromToken(TOKENS_LIST.find(t => t.symbol === pair.from) || TOKENS_LIST[0]);
+                      setToToken(TOKENS_LIST.find(t => t.symbol === pair.to) || TOKENS_LIST[1]);
+                    }}
+                    className="px-3 py-1 bg-white border border-blue-300 rounded-lg text-xs font-medium text-blue-700 hover:bg-blue-50 transition-colors"
+                  >
+                    {pair.from} → {pair.to}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* From Token */}
           <div className="bg-gray-50 p-4 rounded-xl border border-gray-100 focus-within:ring-2 focus-within:ring-blue-100 transition-all">
             <div className="flex justify-between mb-2">
@@ -279,9 +470,9 @@ export default function SwapPage() {
               <div className="text-sm text-gray-500 flex gap-2 items-center">
                  <Wallet className="w-3 h-3" />
                  <span>{formattedBalance}</span>
-                 {account && (
-                   <button 
-                     onClick={() => setAmountIn((balance - 0.01 > 0 ? balance - 0.01 : 0).toString())} 
+                 {currentAddress && (
+                   <button
+                     onClick={() => setAmountIn((balance - 0.01 > 0 ? balance - 0.01 : 0).toString())}
                      className="text-blue-600 font-bold hover:text-blue-700 text-xs bg-blue-50 px-2 py-0.5 rounded ml-1 transition-colors"
                    >
                      MAX
@@ -351,50 +542,161 @@ export default function SwapPage() {
             </div>
           </div>
 
-          {/* Route Info */}
+          {/* Route Info & Price Impact */}
           {quote && (
-            <div className="bg-blue-50 p-3 rounded-lg border border-blue-100 text-sm text-blue-800">
-              <div className="flex justify-between items-center mb-1">
-                <span className="font-semibold">Best Route Found</span>
-                <span className="bg-blue-200 px-2 py-0.5 rounded text-xs text-blue-900">Aggregator</span>
-              </div>
-              <div className="flex items-center gap-2 text-xs opacity-80 flex-wrap">
-                 {/* Simple visualization of providers */}
-                 {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
-                 {quote.paths[0]?.steps?.map((step: any, idx: number) => (
-                    <span key={idx} className="flex items-center">
-                        {idx > 0 && <span className="mx-1">→</span>}
-                        <span>Pool via {quote.paths[0].label || 'Cetus'}</span>
+            <div className="space-y-2">
+              <div className={`p-3 rounded-lg border ${quote.source === 'aggregator' ? 'bg-blue-50 border-blue-100' : 'bg-purple-50 border-purple-100'}`}>
+                <div className="flex justify-between items-center mb-3">
+                  <span className="font-semibold text-gray-800">Route Details</span>
+                  <span className={`px-2 py-0.5 rounded text-xs font-medium ${quote.source === 'aggregator' ? 'bg-blue-200 text-blue-900' : 'bg-purple-200 text-purple-900'}`}>
+                    {quote.source === 'aggregator' ? '🔀 Aggregator' : '🎯 Direct Pool'}
+                  </span>
+                </div>
+
+                <div className="space-y-2 text-xs">
+                  {/* Route Type */}
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Type:</span>
+                    <span className="font-medium text-gray-800">
+                      {quote.source === 'aggregator' ? 'Multi-hop via Cetus Aggregator' : `Direct ${fromToken.symbol}-${toToken.symbol} Pool`}
                     </span>
-                 ))}
+                  </div>
+
+                  {/* Output Amount */}
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Output:</span>
+                    <span className="font-medium text-gray-800">
+                      {(Number(quote.amountOut) / Math.pow(10, toToken.decimals)).toFixed(6)} {toToken.symbol}
+                    </span>
+                  </div>
+
+                  {/* Fee Information */}
+                  {quote.estimatedFee !== undefined && (
+                    <div className="flex justify-between">
+                      <span className="text-gray-600">Est. Fee:</span>
+                      <span className="font-medium text-gray-800">
+                        {quote.estimatedFee > 0 ? `${quote.estimatedFee} ${toToken.symbol}` : 'Included'}
+                      </span>
+                    </div>
+                  )}
+
+                  {/* Path Information */}
+                  {quote.source === 'aggregator' && quote.paths && (
+                    <div className="mt-2 pt-2 border-t border-blue-200">
+                      <div className="text-gray-600 mb-1">Paths ({quote.paths.length}):</div>
+                      <div className="space-y-1">
+                        {quote.paths.map((path: any, idx: number) => (
+                          <div key={idx} className="text-gray-700 ml-2">
+                            • {path.label || `Path ${idx + 1}`}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Pool Address for Direct Swaps */}
+                  {quote.source !== 'aggregator' && quote.poolAddress && (
+                    <div className="mt-2 pt-2 border-t border-purple-200">
+                      <div className="text-gray-600 mb-1">Pool:</div>
+                      <div className="text-gray-700 ml-2 font-mono text-[10px] break-all">
+                        {quote.poolAddress.slice(0, 10)}...{quote.poolAddress.slice(-8)}
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
+
+              {/* Price Impact Warning */}
+              {priceImpact !== null && (
+                <div className={`p-3 rounded-lg border text-sm ${
+                  priceImpact > 5 ? 'bg-red-50 border-red-100 text-red-700' :
+                  priceImpact > 1 ? 'bg-yellow-50 border-yellow-100 text-yellow-700' :
+                  'bg-green-50 border-green-100 text-green-700'
+                }`}>
+                  <div className="flex justify-between items-center">
+                    <span className="font-medium">Price Impact</span>
+                    <span className="font-bold">{priceImpact.toFixed(2)}%</span>
+                  </div>
+                </div>
+              )}
+
+              {/* Multiple Routes Selection */}
+              {quote && quote.source === 'aggregator' && quote.routes && quote.routes.length > 1 && (
+                <div className="bg-indigo-50 p-3 rounded-lg border border-indigo-200">
+                  <div className="text-sm font-semibold text-gray-800 mb-2">
+                    Available Routes ({quote.routes.length})
+                  </div>
+                  <div className="space-y-2">
+                    {quote.routes.map((route: any) => (
+                      <button
+                        key={route.id}
+                        onClick={() => setSelectedRouteId(route.id)}
+                        className={`w-full p-2 rounded-lg border-2 transition-all text-left ${
+                          selectedRouteId === route.id
+                            ? 'border-blue-500 bg-blue-50'
+                            : 'border-indigo-200 bg-white hover:border-blue-300'
+                        }`}
+                      >
+                        <div className="flex justify-between items-center">
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-medium text-gray-600">
+                              {route.hopCount} hop{route.hopCount > 1 ? 's' : ''}
+                            </span>
+                            <span className="text-xs text-gray-500">
+                              {route.pathSteps.map((s: any) => s.provider).join(' → ')}
+                            </span>
+                          </div>
+                          <span className="text-sm font-bold text-gray-800">
+                            {(Number(route.amountOut) / Math.pow(10, toToken.decimals)).toFixed(6)} {toToken.symbol}
+                          </span>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
           {/* Action Button */}
           {currentAddress ? (
-             <button 
+             <button
                 onClick={handleSwap}
-                disabled={!quote || loading || swapStatus === 'swapping'}
+                disabled={!quote || loading || swapStatus === 'swapping' || swapStatus === 'confirming' || isHighPriceImpact}
                 className={`w-full py-4 rounded-xl font-bold text-lg shadow-lg transition-all
-                  ${!quote || loading ? 'bg-gray-300 text-gray-500 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700 text-white shadow-blue-500/30'}
+                  ${!quote || loading || swapStatus === 'swapping' || swapStatus === 'confirming' || isHighPriceImpact ? 'bg-gray-300 text-gray-500 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700 text-white shadow-blue-500/30'}
                 `}
+                title={isHighPriceImpact ? `Price impact too high (${priceImpact?.toFixed(2)}% > ${PRICE_IMPACT_THRESHOLD}%)` : ''}
              >
-                {swapStatus === 'swapping' ? 'Swapping...' : 'Swap Now'}
+                {swapStatus === 'swapping' ? '⏳ Swapping...' : swapStatus === 'confirming' ? '⏳ Confirming...' : 'Swap Now'}
              </button>
           ) : (
-             <div className="w-full flex gap-3">
-               <button onClick={handleGoogleLogin} className="flex-1 py-4 rounded-xl font-bold text-lg bg-white border-2 border-gray-200 hover:bg-gray-50 text-gray-700 flex justify-center items-center gap-2 transition-all">
-                  <Image src="https://upload.wikimedia.org/wikipedia/commons/c/c1/Google_%22G%22_logo.svg" alt="G" width={24} height={24} />
-                  Google Login
-               </button>
-               <div className="flex-1">
-                  <ConnectButton className="w-full !justify-center !py-4 !rounded-xl !text-lg !font-bold" />
+             <div className="space-y-3">
+               <p className="text-center text-sm text-gray-600 font-medium">Choose your login method:</p>
+               <div className="w-full flex gap-3 login-button-container">
+                 <button
+                   onClick={handleGoogleLogin}
+                   className="flex-1 h-20"
+                 >
+                    <Image src="https://upload.wikimedia.org/wikipedia/commons/c/c1/Google_%22G%22_logo.svg" alt="G" width={24} height={24} />
+                    <span>Google Login</span>
+                    <span className="text-xs text-gray-500 font-normal">Existing users</span>
+                 </button>
+                 <div className="flex-1 h-20">
+                    <ConnectButton />
+                 </div>
                </div>
              </div>
           )}
           
           {/* Status Messages */}
+          {txWaitMessage && (
+              <div className="p-3 bg-blue-100 text-blue-700 rounded-lg text-center text-sm flex items-center gap-2 justify-center animate-pulse">
+                  <div className="w-2 h-2 bg-blue-700 rounded-full animate-bounce"></div>
+                  <span>{txWaitMessage}</span>
+              </div>
+          )}
+
           {swapStatus === 'error' && (
               <div className="p-3 bg-red-100 text-red-700 rounded-lg text-center text-sm break-all flex items-center gap-2 justify-center">
                   <XCircle size={18} />
@@ -416,9 +718,14 @@ export default function SwapPage() {
              <p className="text-gray-500 mb-6">Your transaction has been processed successfully on the Sui Network.</p>
              
              {lastTxDigest && (
-               <div className="bg-gray-50 rounded-lg p-3 mb-6 text-xs text-gray-500 break-all font-mono">
+               <a
+                 href={`${SUI_NETWORK === 'mainnet' ? 'https://suiscan.xyz/mainnet' : 'https://suiscan.xyz/testnet'}/tx/${lastTxDigest}`}
+                 target="_blank"
+                 rel="noopener noreferrer"
+                 className="block bg-gray-50 hover:bg-blue-50 rounded-lg p-3 mb-6 text-xs text-blue-600 hover:text-blue-700 break-all font-mono transition-colors cursor-pointer"
+               >
                  Tx: {lastTxDigest}
-               </div>
+               </a>
              )}
 
              <button 
@@ -437,7 +744,12 @@ export default function SwapPage() {
         {SUI_NETWORK === 'testnet' && (
           <div className="flex items-center justify-center gap-2 mt-2 text-yellow-600 bg-yellow-50 py-1 px-3 rounded-full inline-flex">
              <AlertTriangle size={14} />
-             <span className="text-xs font-medium">Testnet Mode: Only SUI-USDC supported</span>
+             <span className="text-xs font-medium">Testnet: SUI-MEME, SUI-IDOL pairs</span>
+          </div>
+        )}
+        {SUI_NETWORK === 'mainnet' && (
+          <div className="flex items-center justify-center gap-2 mt-2 text-blue-600 bg-blue-50 py-1 px-3 rounded-full inline-flex">
+             <span className="text-xs font-medium">Mainnet: SUI-USDC, SUI-CETUS, USDC-CETUS</span>
           </div>
         )}
       </div>

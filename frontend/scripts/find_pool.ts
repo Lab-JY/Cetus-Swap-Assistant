@@ -10,10 +10,10 @@ const WORMHOLE_USDC = "0x5d4b302506645c37ff133b98c4b50a5ae14841659738d6d733d59d0
 async function findPool(coinA: string, coinB: string, name: string) {
     console.log(`Searching for ${name} Pool...`);
     try {
-        const pools: any = await sdk.Pool.getPoolsWithPage([], { limit: 50 });
-        
+        const pools: any = await sdk.Pool.getPoolsWithPage([], { limit: 500 });
+
         const matches = pools.filter((p: any) => {
-            return (p.coinTypeA === coinA && p.coinTypeB === coinB) || 
+            return (p.coinTypeA === coinA && p.coinTypeB === coinB) ||
                    (p.coinTypeA === coinB && p.coinTypeB === coinA);
         });
 
@@ -21,7 +21,7 @@ async function findPool(coinA: string, coinB: string, name: string) {
             console.log(`✅ Found ${name} Pool: ${matches[0].poolAddress}`);
             return matches[0].poolAddress;
         } else {
-            console.log(`❌ No ${name} pool found in first 50 results.`);
+            console.log(`❌ No ${name} pool found.`);
             return null;
         }
     } catch (e) {
@@ -30,9 +30,26 @@ async function findPool(coinA: string, coinB: string, name: string) {
     }
 }
 
+async function listAllPools() {
+    console.log("\n📋 Listing all available pools on Testnet...\n");
+    try {
+        const pools: any = await sdk.Pool.getPoolsWithPage([], { limit: 100 });
+        console.log(`Total pools found: ${pools.length}\n`);
+
+        pools.slice(0, 20).forEach((p: any, idx: number) => {
+            console.log(`${idx + 1}. Pool ID: ${p.poolAddress}`);
+            console.log(`   Coin A: ${p.coinTypeA}`);
+            console.log(`   Coin B: ${p.coinTypeB}\n`);
+        });
+    } catch (e) {
+        console.error("Error listing pools:", e);
+    }
+}
+
 async function main() {
     await findPool(SUI, NATIVE_USDC, "SUI-NativeUSDC");
     await findPool(SUI, WORMHOLE_USDC, "SUI-WormholeUSDC");
+    await listAllPools();
 }
 
 main();
