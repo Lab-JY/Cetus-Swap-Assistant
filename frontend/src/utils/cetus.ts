@@ -8,8 +8,11 @@ import { TOKENS, CETUS_SWAP_PACKAGE_ID, SUI_NETWORK, POOL_IDS } from "./config";
 // We use CLMM SDK directly because Aggregator SDK can be unstable on Testnet due to indexer lag.
 const cetusClmmSDK = initCetusSDK({
     network: SUI_NETWORK as 'mainnet' | 'testnet',
-    simulationAccount: '0x0000000000000000000000000000000000000000000000000000000000000000', // Dummy valid address for read-only ops
+    // simulationAccount removed as it's not in the type definition. 
+    // If needed, it should be passed via other means or the SDK version might have changed.
 });
+// Manually set senderAddress if the SDK instance allows it (as a property), or rely on caller context.
+cetusClmmSDK.senderAddress = '0x0000000000000000000000000000000000000000000000000000000000000000';
 
 export const SUI_COIN_TYPE = TOKENS.SUI;
 export const CETUS_COIN_TYPE = TOKENS.CETUS; 

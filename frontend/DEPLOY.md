@@ -36,13 +36,31 @@ This project includes a production-ready `Dockerfile` optimized for Next.js stan
 
 ---
 
+### Option 3: Zeabur (Docker)
+
+1. **New Service**: Create a new service in Zeabur project -> Select "Git".
+2. **Repo**: Select your repo.
+3. **Settings**:
+   - Go to "Settings" -> "Source".
+   - Set **Service Path** to `/frontend`.
+   - Zeabur will automatically detect the Dockerfile.
+4. **Variables**:
+   - Go to "Variables".
+   - Add the variables listed below.
+   - Zeabur automatically injects variables as Build Args, so the Dockerfile will pick them up correctly.
+5. **Domain**:
+   - Go to "Networking" -> "Public" -> Generate a domain.
+   - Update `NEXT_PUBLIC_APP_URL`.
+
+---
+
 ### Environment Variables
 
 Add these to your deployment platform (Vercel or Railway):
 
-| Name | Value (Mainnet) |
+| Name | Value (Testnet) |
 |------|-----------------|
-| `NEXT_PUBLIC_SUI_NETWORK` | `mainnet` |
+| `NEXT_PUBLIC_SUI_NETWORK` | `testnet` |
 | `NEXT_PUBLIC_CETUS_SWAP_PACKAGE_ID` | `0x3165544e38f9baf1a897d2660a2a545f9634862417444c63c9f401da8b67a331` |
 | `NEXT_PUBLIC_GOOGLE_CLIENT_ID` | `96407708019-pkjplel118bu7v1uncv6ji0g1ms7bb3g.apps.googleusercontent.com` |
 | `NEXT_PUBLIC_APP_URL` | `https://your-app-url.com` (Update after deploy!) |
