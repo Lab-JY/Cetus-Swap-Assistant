@@ -14,6 +14,20 @@ export const KEY_PAIR_SESSION_KEY = 'zklogin_ephemeral_key';
 export const RANDOMNESS_SESSION_KEY = 'zklogin_randomness';
 export const MAX_EPOCH_KEY = 'zklogin_max_epoch';
 
+interface ZkProof {
+  proofPoints: {
+    piA: string[];
+    piB: string[][];
+    piC: string[];
+  };
+  issBase64Details: {
+    iss: string;
+    iss_base64url: string;
+  };
+  headerBase64: string;
+  addressSeed?: string;
+}
+
 export function setupEphemeralKey() {
     const ephemeralKeyPair = new Ed25519Keypair();
     const randomness = generateRandomness();
@@ -69,7 +83,7 @@ export function clearZkLoginSession() {
  * Call the official Sui Proving Service to get ZK proof
  * This is required to sign transactions with zkLogin
  */
-export async function getZkProofFromProvingService(jwt: string): Promise<any> {
+export async function getZkProofFromProvingService(jwt: string): Promise<ZkProof> {
     try {
         console.log('🔐 Calling Sui Proving Service to generate ZK proof...');
 

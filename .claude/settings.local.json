@@ -14,7 +14,8 @@
       "WebSearch",
       "Bash(sui move build:*)",
       "Bash(lsof:*)",
-      "Bash(xargs kill:*)"
+      "Bash(xargs kill:*)",
+      "Bash(npm run lint)"
     ]
   }
 }

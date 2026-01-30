@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { AggregatorClient, Env } from "@cetusprotocol/aggregator-sdk";
-import { initCetusSDK, TickMath } from "@cetusprotocol/cetus-sui-clmm-sdk";
+import { initCetusSDK } from "@cetusprotocol/cetus-sui-clmm-sdk";
 import { Transaction } from "@mysten/sui/transactions";
 import BN from "bn.js";
 import { TOKENS, SUI_NETWORK, POOL_IDS, CETUS_SWAP_PACKAGE_ID } from "./config";

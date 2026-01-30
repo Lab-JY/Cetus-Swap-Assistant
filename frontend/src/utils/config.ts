@@ -9,8 +9,8 @@ export const CETUS_SWAP_PACKAGE_ID = process.env.NEXT_PUBLIC_CETUS_SWAP_PACKAGE_
 // Default to Mainnet unless NEXT_PUBLIC_SUI_NETWORK is set to 'testnet'
 export const SUI_NETWORK = (process.env.NEXT_PUBLIC_SUI_NETWORK === 'testnet') ? 'testnet' : 'mainnet';
 
-export const SUI_EXPLORER_URL = SUI_NETWORK === 'mainnet' 
-    ? 'https://suiscan.xyz/mainnet' 
+export const SUI_EXPLORER_URL = SUI_NETWORK === 'mainnet'
+    ? 'https://suiscan.xyz/mainnet'
     : 'https://suiscan.xyz/testnet';
 
 // 💰 Token Configuration
@@ -46,8 +46,3 @@ export const POOL_IDS = {
         SUI_IDOL_DGRAN: '0x81d7139b1ddce0fbd4166360de442f45519dee3a1ba860ba8c62b4d7ecd4f593'  // SUI-IDOL_DGRAN
     }
 };
-
-// 🎯 Testnet Token Definitions
-const TESTNET_MEME_TOKEN = '0x5bab1e6852a537a8b07edd10ed9bc2e41d9c75b2ada472bc9bd6bed14000563b::meme_token::MEME_TOKEN';
-const TESTNET_IDOL_APPLE = '0xb8adb26867c2dfecdbd7c309754b1e6cc15a0bbe767d28fc28bece56ad991d4c::idol_apple_1767616383788::IDOL_APPLE_1767616383788';
-const TESTNET_IDOL_DGRAN = '0xbe4c4cc55d3aaa1a9c01f17b88199b06b96c032fc698184ea71235260f1d6d4c::idol_dgran_1767614261042::IDOL_DGRAN_1767614261042';

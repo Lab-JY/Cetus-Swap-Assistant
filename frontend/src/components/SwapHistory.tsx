@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { ExternalLink, RefreshCw, ChevronRight, ChevronLeft } from 'lucide-react';
 import { getSwapHistory, getTokenSymbol, SUI_NETWORK } from '@/utils/cetus';
 
@@ -16,6 +16,7 @@ interface SwapRecord {
 
 interface SwapHistoryProps {
   userAddress: string | null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   suiClient: any;
   refreshTrigger?: number;
 }
@@ -29,7 +30,7 @@ export default function SwapHistory({ userAddress, suiClient, refreshTrigger }: 
     ? 'https://suiscan.xyz/mainnet'
     : 'https://suiscan.xyz/testnet';
 
-  const fetchHistory = async () => {
+  const fetchHistory = useCallback(async () => {
     if (!userAddress || !suiClient) return;
 
     setLoading(true);
@@ -41,11 +42,11 @@ export default function SwapHistory({ userAddress, suiClient, refreshTrigger }: 
     } finally {
       setLoading(false);
     }
-  };
+  }, [userAddress, suiClient]);
 
   useEffect(() => {
     fetchHistory();
-  }, [userAddress, refreshTrigger]);
+  }, [userAddress, refreshTrigger, fetchHistory]);
 
   const formatTime = (timestamp: number) => {
     const date = new Date(timestamp * 1000);

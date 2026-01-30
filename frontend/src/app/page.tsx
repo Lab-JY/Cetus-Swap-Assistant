@@ -5,7 +5,7 @@ import { ConnectButton, useCurrentAccount, useSignAndExecuteTransaction, useSuiC
 import { Transaction } from '@mysten/sui/transactions';
 import { SUI_COIN_TYPE, USDC_COIN_TYPE, CETUS_COIN_TYPE, WUSDC_COIN_TYPE, getSwapQuote, buildSimpleSwapTx, SUI_NETWORK, recordSwapEvent } from '@/utils/cetus';
 import Image from 'next/image';
-import { RefreshCcw, ArrowDownUp, Wallet, LogOut, Copy, CheckCircle2, XCircle, AlertTriangle } from 'lucide-react';
+import { RefreshCcw, ArrowDownUp, Wallet, LogOut, Copy, CheckCircle2, XCircle } from 'lucide-react';
 import { getGoogleLoginUrl, clearZkLoginSession, signTransactionWithZkLogin } from '@/utils/zklogin';
 import confetti from 'canvas-confetti';
 import SwapHistory from '@/components/SwapHistory';
@@ -125,9 +125,9 @@ export default function SwapPage() {
         console.log("Quote received:", routes);
 
         // Check if the response is an error
-        if (routes && (routes as any).error) {
+        if (routes && 'error' in routes && routes.error) {
           setQuote(null);
-          setErrorMessage((routes as any).errorMessage);
+          setErrorMessage('errorMessage' in routes ? String(routes.errorMessage) : 'Unknown error');
         } else {
           setQuote(routes);
         }
@@ -142,7 +142,7 @@ export default function SwapPage() {
 
     const timer = setTimeout(fetchQuote, 500);
     return () => clearTimeout(timer);
-  }, [amountIn, fromToken, toToken]);
+  }, [amountIn, fromToken, toToken, currentAddress]);
 
   const handleSwap = async () => {
     if (!currentAddress || !quote) return;
@@ -609,7 +609,7 @@ export default function SwapPage() {
                     <div className="mt-2 pt-2 border-t border-blue-200">
                       <div className="text-gray-600 mb-1">Paths ({quote.paths.length}):</div>
                       <div className="space-y-1">
-                        {quote.paths.map((path: any, idx: number) => (
+                        {quote.paths.map((path: { label?: string }, idx: number) => (
                           <div key={idx} className="text-gray-700 ml-2">
                             • {path.label || `Path ${idx + 1}`}
                           </div>
@@ -651,7 +651,7 @@ export default function SwapPage() {
                     Available Routes ({quote.routes.length})
                   </div>
                   <div className="space-y-2">
-                    {quote.routes.map((route: any) => (
+                    {quote.routes.map((route: { id: number; amountOut: { toString: () => string }; hopCount: number; pathSteps: Array<{ provider: string }> }) => (
                       <button
                         key={route.id}
                         onClick={() => setSelectedRouteId(route.id)}
@@ -667,7 +667,7 @@ export default function SwapPage() {
                               {route.hopCount} hop{route.hopCount > 1 ? 's' : ''}
                             </span>
                             <span className="text-xs text-gray-500">
-                              {route.pathSteps.map((s: any) => s.provider).join(' → ')}
+                              {route.pathSteps.map((s: { provider: string }) => s.provider).join(' → ')}
                             </span>
                           </div>
                           <span className="text-sm font-bold text-gray-800">
