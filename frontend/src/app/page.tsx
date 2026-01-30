@@ -3,18 +3,22 @@
 import { useState, useEffect } from 'react';
 import { ConnectButton, useCurrentAccount, useSignAndExecuteTransaction, useSuiClient, useSuiClientQuery } from '@mysten/dapp-kit';
 import { Transaction } from '@mysten/sui/transactions';
-import { SUI_COIN_TYPE, USDC_COIN_TYPE, CETUS_COIN_TYPE, WUSDC_COIN_TYPE, getSwapQuote, buildSimpleSwapTx } from '@/utils/cetus';
+import { SUI_COIN_TYPE, USDC_COIN_TYPE, CETUS_COIN_TYPE, WUSDC_COIN_TYPE, getSwapQuote, buildSimpleSwapTx, SUI_NETWORK } from '@/utils/cetus';
 import Image from 'next/image';
-import { RefreshCcw, ArrowDownUp, Wallet, LogOut, Copy, CheckCircle2, XCircle } from 'lucide-react';
+import { RefreshCcw, ArrowDownUp, Wallet, LogOut, Copy, CheckCircle2, XCircle, AlertTriangle } from 'lucide-react';
 import { getGoogleLoginUrl, clearZkLoginSession } from '@/utils/zklogin';
 import confetti from 'canvas-confetti';
 
-const TOKENS_LIST = [
+const ALL_TOKENS = [
   { symbol: 'SUI', name: 'Sui', type: SUI_COIN_TYPE, decimals: 9, icon: '💧' },
   { symbol: 'USDC', name: 'USD Coin', type: USDC_COIN_TYPE, decimals: 6, icon: '💵' },
   { symbol: 'CETUS', name: 'Cetus Token', type: CETUS_COIN_TYPE, decimals: 9, icon: '🌊' },
   { symbol: 'wUSDC', name: 'Wormhole USDC', type: WUSDC_COIN_TYPE, decimals: 6, icon: '🌉' },
 ];
+
+const TOKENS_LIST = SUI_NETWORK === 'testnet' 
+  ? ALL_TOKENS.filter(t => ['SUI', 'USDC'].includes(t.symbol)) 
+  : ALL_TOKENS;
 
 export default function SwapPage() {
   const account = useCurrentAccount();
@@ -122,31 +126,35 @@ export default function SwapPage() {
       let inputCoin;
       const amountInRaw = BigInt(Math.floor(parseFloat(amountIn) * Math.pow(10, fromToken.decimals)));
 
-      if (fromToken.symbol === 'SUI') {
-        inputCoin = tx.splitCoins(tx.gas, [tx.pure.u64(amountInRaw)]);
-      } else {
-        // Fetch coins for other tokens
-        const { data: coins } = await suiClient.getCoins({
-           owner: currentAddress,
-           coinType: fromToken.type
-        });
-        
-        if (coins.length === 0) throw new Error(`No ${fromToken.symbol} balance found.`);
-        
-        // Simple strategy: take the first coin that has enough balance, or merge (not implemented for simplicity)
-        // ideally we merge coins here.
-        // For Hackathon MVP: Just pick the first one with enough balance or fail.
-        const validCoin = coins.find(c => BigInt(c.balance) >= amountInRaw);
-        if (validCoin) {
-             // Split it to exact amount
-             const primaryCoin = tx.object(validCoin.coinObjectId);
-             inputCoin = tx.splitCoins(primaryCoin, [tx.pure.u64(amountInRaw)]);
-        } else {
-             // If no single coin is enough, we need to merge. 
-             // Implementing merge logic is complex for MVP 1-file.
-             // We'll throw specific error.
-             throw new Error(`Insufficient single-coin balance for ${fromToken.symbol}. Please merge coins.`);
-        }
+      // ⚠️ CLMM SDK (Fallback) builds its own transaction with its own coin selection logic.
+      // We only need to manually split coins if we are using the Aggregator (which appends to our tx).
+      if (quote.source !== 'clmm') {
+          if (fromToken.symbol === 'SUI') {
+            inputCoin = tx.splitCoins(tx.gas, [tx.pure.u64(amountInRaw)]);
+          } else {
+            // Fetch coins for other tokens
+            const { data: coins } = await suiClient.getCoins({
+              owner: currentAddress,
+              coinType: fromToken.type
+            });
+            
+            if (coins.length === 0) throw new Error(`No ${fromToken.symbol} balance found.`);
+            
+            // Simple strategy: take the first coin that has enough balance, or merge (not implemented for simplicity)
+            // ideally we merge coins here.
+            // For Hackathon MVP: Just pick the first one with enough balance or fail.
+            const validCoin = coins.find(c => BigInt(c.balance) >= amountInRaw);
+            if (validCoin) {
+                // Split it to exact amount
+                const primaryCoin = tx.object(validCoin.coinObjectId);
+                inputCoin = tx.splitCoins(primaryCoin, [tx.pure.u64(amountInRaw)]);
+            } else {
+                // If no single coin is enough, we need to merge. 
+                // Implementing merge logic is complex for MVP 1-file.
+                // We'll throw specific error.
+                throw new Error(`Insufficient single-coin balance for ${fromToken.symbol}. Please merge coins.`);
+            }
+          }
       }
 
       const finalTx = await buildSimpleSwapTx(tx, quote, inputCoin, currentAddress, toToken.type);
@@ -425,7 +433,13 @@ export default function SwapPage() {
       
       {/* Footer */}
       <div className="mt-8 text-center text-gray-400 text-sm">
-        <p>Powered by Cetus Aggregator SDK on Sui Testnet</p>
+        <p>Powered by Cetus Aggregator SDK on Sui {SUI_NETWORK === 'testnet' ? 'Testnet' : 'Mainnet'}</p>
+        {SUI_NETWORK === 'testnet' && (
+          <div className="flex items-center justify-center gap-2 mt-2 text-yellow-600 bg-yellow-50 py-1 px-3 rounded-full inline-flex">
+             <AlertTriangle size={14} />
+             <span className="text-xs font-medium">Testnet Mode: Only SUI-USDC supported</span>
+          </div>
+        )}
       </div>
     </div>
   );

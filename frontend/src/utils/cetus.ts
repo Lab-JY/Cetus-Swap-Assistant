@@ -5,6 +5,8 @@ import { Transaction } from "@mysten/sui/transactions";
 import BN from "bn.js";
 import { TOKENS, SUI_NETWORK, POOL_IDS } from "./config";
 
+export { SUI_NETWORK }; // Re-export for frontend use
+
 // 🌟 Initialize Cetus Aggregator SDK
 const aggregator = new AggregatorClient({
     endpoint: SUI_NETWORK === 'mainnet' ? 'https://api-sui.cetus.zone/router_v3/find_routes' : undefined,
