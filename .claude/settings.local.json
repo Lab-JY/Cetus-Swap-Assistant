@@ -12,7 +12,9 @@
       "Bash(curl:*)",
       "Bash(pkill:*)",
       "WebSearch",
-      "Bash(sui move build:*)"
+      "Bash(sui move build:*)",
+      "Bash(lsof:*)",
+      "Bash(xargs kill:*)"
     ]
   }
 }

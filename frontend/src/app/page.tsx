@@ -8,6 +8,7 @@ import Image from 'next/image';
 import { RefreshCcw, ArrowDownUp, Wallet, LogOut, Copy, CheckCircle2, XCircle, AlertTriangle } from 'lucide-react';
 import { getGoogleLoginUrl, clearZkLoginSession, signTransactionWithZkLogin } from '@/utils/zklogin';
 import confetti from 'canvas-confetti';
+import SwapHistory from '@/components/SwapHistory';
 
 const MAINNET_TOKENS = [
   { symbol: 'SUI', name: 'Sui', type: SUI_COIN_TYPE, decimals: 9, icon: '💧' },
@@ -79,6 +80,7 @@ export default function SwapPage() {
   const [lastTxDigest, setLastTxDigest] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
   const [txWaitMessage, setTxWaitMessage] = useState('');
+  const [historyRefreshTrigger, setHistoryRefreshTrigger] = useState(0);
 
   // 💰 Fetch Balance
   const { data: balanceData, refetch: refetchBalance } = useSuiClientQuery(
@@ -230,6 +232,7 @@ export default function SwapPage() {
                   setQuote(null);
                   setTxWaitMessage('');
                   refetchBalance(); // Refresh balance after swap
+                  setHistoryRefreshTrigger(prev => prev + 1); // Trigger history refresh
                   setShowSuccessModal(true);
 
                   // 🎉 Confetti Effect
@@ -303,6 +306,7 @@ export default function SwapPage() {
               setQuote(null);
               setTxWaitMessage('');
               refetchBalance();
+              setHistoryRefreshTrigger(prev => prev + 1); // Trigger history refresh
               setShowSuccessModal(true);
 
               // Confetti Effect
@@ -385,7 +389,9 @@ export default function SwapPage() {
     : '---';
 
   return (
-    <div className="min-h-screen bg-gray-50 flex flex-col items-center justify-center p-4">
+    <div className="min-h-screen bg-gray-50 flex">
+      {/* Main Swap Card */}
+      <div className="flex-1 flex flex-col items-center justify-center p-4">
       <div className="max-w-md w-full bg-white rounded-2xl shadow-xl overflow-hidden">
         {/* Header */}
         <div className="bg-gradient-to-r from-blue-600 to-indigo-600 p-6 text-white flex justify-between items-center">
@@ -706,6 +712,16 @@ export default function SwapPage() {
 
         </div>
       </div>
+      </div>
+
+      {/* Swap History Sidebar */}
+      {currentAddress && (
+        <SwapHistory
+          userAddress={currentAddress}
+          suiClient={suiClient}
+          refreshTrigger={historyRefreshTrigger}
+        />
+      )}
 
       {/* Success Modal */}
       {showSuccessModal && (
@@ -737,22 +753,7 @@ export default function SwapPage() {
           </div>
         </div>
       )}
-      
-      {/* Footer */}
-      <div className="mt-8 text-center text-gray-400 text-sm">
-        <p>Powered by Cetus Aggregator SDK on Sui {SUI_NETWORK === 'testnet' ? 'Testnet' : 'Mainnet'}</p>
-        {SUI_NETWORK === 'testnet' && (
-          <div className="flex items-center justify-center gap-2 mt-2 text-yellow-600 bg-yellow-50 py-1 px-3 rounded-full inline-flex">
-             <AlertTriangle size={14} />
-             <span className="text-xs font-medium">Testnet: SUI-MEME, SUI-IDOL pairs</span>
-          </div>
-        )}
-        {SUI_NETWORK === 'mainnet' && (
-          <div className="flex items-center justify-center gap-2 mt-2 text-blue-600 bg-blue-50 py-1 px-3 rounded-full inline-flex">
-             <span className="text-xs font-medium">Mainnet: SUI-USDC, SUI-CETUS, USDC-CETUS</span>
-          </div>
-        )}
-      </div>
+
     </div>
   );
 }

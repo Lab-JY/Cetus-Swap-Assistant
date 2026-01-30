@@ -3,7 +3,7 @@ import { AggregatorClient, Env } from "@cetusprotocol/aggregator-sdk";
 import { initCetusSDK, TickMath } from "@cetusprotocol/cetus-sui-clmm-sdk";
 import { Transaction } from "@mysten/sui/transactions";
 import BN from "bn.js";
-import { TOKENS, SUI_NETWORK, POOL_IDS } from "./config";
+import { TOKENS, SUI_NETWORK, POOL_IDS, CETUS_SWAP_PACKAGE_ID } from "./config";
 
 export { SUI_NETWORK }; // Re-export for frontend use
 
@@ -255,4 +255,68 @@ function adjustForSlippage(amount: BN, slippage: number, isMax: boolean): BN {
     } else {
         return amount.mul(base.add(slippageBN)).div(base);
     }
+}
+
+// 📊 Query Swap History from SwapRegistry
+export async function getSwapHistory(
+    suiClient: any,
+    userAddress: string,
+    registryObjectId: string,
+    limit: number = 10
+) {
+    try {
+        console.log(`📊 Fetching swap history for ${userAddress}...`);
+
+        // Query SwapEvent for the user
+        const events = await suiClient.queryEvents({
+            query: {
+                MoveEventType: `${CETUS_SWAP_PACKAGE_ID}::swap_helper::SwapEvent`
+            }
+        });
+
+        if (!events || !events.data) {
+            return [];
+        }
+
+        // Filter events for current user and sort by timestamp
+        const userEvents = events.data
+            .filter((event: any) => {
+                const parsedJson = event.parsedJson as any;
+                return parsedJson && parsedJson.user === userAddress;
+            })
+            .sort((a: any, b: any) => {
+                const aTime = Number((a.parsedJson as any).timestamp || 0);
+                const bTime = Number((b.parsedJson as any).timestamp || 0);
+                return bTime - aTime; // Most recent first
+            })
+            .slice(0, limit);
+
+        return userEvents.map((event: any) => {
+            const data = event.parsedJson as any;
+            return {
+                user: data.user,
+                fromCoin: data.from_coin,
+                toCoin: data.to_coin,
+                amountIn: data.amount_in,
+                amountOut: data.amount_out,
+                timestamp: Number(data.timestamp),
+                txDigest: event.id?.txDigest || ''
+            };
+        });
+    } catch (error) {
+        console.error("❌ Error fetching swap history:", error);
+        return [];
+    }
+}
+
+// Helper to get token symbol from coin type
+export function getTokenSymbol(coinType: string): string {
+    if (coinType.includes('::sui::SUI')) return 'SUI';
+    if (coinType.includes('::usdc::USDC')) return 'USDC';
+    if (coinType.includes('::cetus::CETUS')) return 'CETUS';
+    if (coinType.includes('::coin::COIN')) return 'wUSDC';
+    if (coinType.includes('::meme_token::MEME_TOKEN')) return 'MEME';
+    if (coinType.includes('::idol_apple')) return 'IDOL_APPLE';
+    if (coinType.includes('::idol_dgran')) return 'IDOL_DGRAN';
+    return 'UNKNOWN';
 }
