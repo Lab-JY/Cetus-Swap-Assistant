@@ -54,37 +54,37 @@ export async function getSwapQuote(
                  }
              }
 
-             // If fast-track failed or not SUI-USDC, try scanning (slow)
-             if (!cachedPool) {
-                let pools: any = { data: [] };
-                try {
-                    pools = await cetusClmmSDK.Pool.getPoolsWithPage([]); 
-                } catch (e) {
-                    console.warn("⚠️ Failed to fetch pool list from SDK.");
-                }
+            // If fast-track failed or not SUI-USDC, try scanning with filters (Recommended)
+            if (!cachedPool) {
+               console.log("🔍 Scanning for pool on-chain...");
+               try {
+                   // Correct way: Pass filters to getPoolsWithPage
+                   const res: any = await cetusClmmSDK.Pool.getPoolsWithPage([], {
+                       coinTypeA: fromCoinType,
+                       coinTypeB: toCoinType,
+                       limit: 10
+                   });
+                   
+                   // Check structure (res might be array or object with data)
+                   const pools = Array.isArray(res) ? res : (res.data || []);
 
-                // Simple logic: find a pool that contains both tokens
-                if (pools && pools.data) {
-                    cachedPool = pools.data.find((p: any) => 
-                        (p.coinTypeA === fromCoinType && p.coinTypeB === toCoinType) ||
-                        (p.coinTypeA === toCoinType && p.coinTypeB === fromCoinType)
-                    );
-                }
-             }
-        }
-
-        // 🚨 Final Fallback
-        if (!cachedPool) {
-            console.log("⚠️ Pool not found via SDK list. Trying fallback ID again...");
-            const FALLBACK_POOL_ID = SUI_NETWORK === 'mainnet' ? POOL_IDS.mainnet.SUI_USDC : POOL_IDS.testnet.SUI_USDC;
-            try {
-                cachedPool = await cetusClmmSDK.Pool.getPool(FALLBACK_POOL_ID);
-                console.log("✅ Fetched Hardcoded Pool:", cachedPool.poolAddress);
-            } catch (e) {
-                console.error("❌ Failed to fetch hardcoded pool:", e);
-                return null;
+                   if (pools.length > 0) {
+                       // Sort by liquidity (descending) to get the best pool
+                       pools.sort((a: any, b: any) => Number(b.liquidity) - Number(a.liquidity));
+                       cachedPool = pools[0];
+                       console.log(`✅ Found dynamic pool: ${cachedPool.poolAddress} (Liq: ${cachedPool.liquidity})`);
+                   }
+               } catch (e) {
+                   console.warn("⚠️ Failed to fetch pool list from SDK:", e);
+               }
             }
-        }
+       }
+
+       // 🚨 Final Check
+       if (!cachedPool) {
+           console.error("❌ Pool not found. Please check if the pair exists on this network.");
+           return null;
+       }
 
         console.log("✅ Pool Found:", cachedPool.poolAddress);
 
