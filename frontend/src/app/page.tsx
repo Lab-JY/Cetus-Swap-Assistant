@@ -5,8 +5,9 @@ import { ConnectButton, useCurrentAccount, useSignAndExecuteTransaction, useSuiC
 import { Transaction } from '@mysten/sui/transactions';
 import { SUI_COIN_TYPE, USDC_COIN_TYPE, CETUS_COIN_TYPE, WUSDC_COIN_TYPE, getSwapQuote, buildSimpleSwapTx } from '@/utils/cetus';
 import Image from 'next/image';
-import { RefreshCcw, ArrowDownUp, Wallet, LogOut, Copy } from 'lucide-react';
+import { RefreshCcw, ArrowDownUp, Wallet, LogOut, Copy, CheckCircle2, XCircle } from 'lucide-react';
 import { getGoogleLoginUrl, clearZkLoginSession } from '@/utils/zklogin';
+import confetti from 'canvas-confetti';
 
 const TOKENS_LIST = [
   { symbol: 'SUI', name: 'Sui', type: SUI_COIN_TYPE, decimals: 9, icon: '💧' },
@@ -54,6 +55,8 @@ export default function SwapPage() {
   const [quote, setQuote] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [swapStatus, setSwapStatus] = useState<'idle' | 'swapping' | 'success' | 'error'>('idle');
+  const [showSuccessModal, setShowSuccessModal] = useState(false);
+  const [lastTxDigest, setLastTxDigest] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
 
   // 💰 Fetch Balance
@@ -161,9 +164,37 @@ export default function SwapPage() {
               onSuccess: (result) => {
                 console.log('Swap Success:', result);
                 setSwapStatus('success');
+                setLastTxDigest(result.digest);
                 setAmountIn('');
                 setQuote(null);
                 refetchBalance(); // Refresh balance after swap
+                setShowSuccessModal(true);
+                
+                // 🎉 Confetti Effect
+                const duration = 3000;
+                const end = Date.now() + duration;
+
+                const frame = () => {
+                  confetti({
+                    particleCount: 5,
+                    angle: 60,
+                    spread: 55,
+                    origin: { x: 0 },
+                    colors: ['#3b82f6', '#10b981', '#6366f1']
+                  });
+                  confetti({
+                    particleCount: 5,
+                    angle: 120,
+                    spread: 55,
+                    origin: { x: 1 },
+                    colors: ['#3b82f6', '#10b981', '#6366f1']
+                  });
+
+                  if (Date.now() < end) {
+                    requestAnimationFrame(frame);
+                  }
+                };
+                frame();
               },
               onError: (error) => {
                 console.error('Swap Failed:', error);
@@ -356,19 +387,41 @@ export default function SwapPage() {
           )}
           
           {/* Status Messages */}
-          {swapStatus === 'success' && (
-              <div className="p-3 bg-green-100 text-green-700 rounded-lg text-center text-sm">
-                  Swap Successful! Check your wallet.
-              </div>
-          )}
           {swapStatus === 'error' && (
-              <div className="p-3 bg-red-100 text-red-700 rounded-lg text-center text-sm break-all">
-                  Error: {errorMessage}
+              <div className="p-3 bg-red-100 text-red-700 rounded-lg text-center text-sm break-all flex items-center gap-2 justify-center">
+                  <XCircle size={18} />
+                  <span>{errorMessage}</span>
               </div>
           )}
 
         </div>
       </div>
+
+      {/* Success Modal */}
+      {showSuccessModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-white rounded-2xl shadow-2xl p-8 max-w-sm w-full text-center transform transition-all scale-100 animate-in zoom-in-95 duration-200">
+             <div className="mx-auto flex items-center justify-center h-16 w-16 rounded-full bg-green-100 mb-6">
+                <CheckCircle2 className="h-10 w-10 text-green-600" />
+             </div>
+             <h3 className="text-2xl font-bold text-gray-900 mb-2">Swap Successful!</h3>
+             <p className="text-gray-500 mb-6">Your transaction has been processed successfully on the Sui Network.</p>
+             
+             {lastTxDigest && (
+               <div className="bg-gray-50 rounded-lg p-3 mb-6 text-xs text-gray-500 break-all font-mono">
+                 Tx: {lastTxDigest}
+               </div>
+             )}
+
+             <button 
+               onClick={() => setShowSuccessModal(false)}
+               className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-xl transition-colors shadow-lg shadow-blue-500/30"
+             >
+               Close
+             </button>
+          </div>
+        </div>
+      )}
       
       {/* Footer */}
       <div className="mt-8 text-center text-gray-400 text-sm">

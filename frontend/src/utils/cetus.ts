@@ -31,28 +31,34 @@ export async function getSwapQuote(
     const amount = new BN(amountIn);
 
     try {
-        // 1️⃣ Try Aggregator First
-        console.log("Trying Aggregator...");
-        const router = await aggregator.findRouters({
-            from: fromCoinType,
-            target: toCoinType,
-            amount: amount,
-            byAmountIn: byAmountIn,
-        });
-
-        if (router) {
-            console.log("✅ Aggregator Route Found:", {
-                amountOut: router.amountOut.toString(),
-                splitPaths: router.paths?.length
+        // 1️⃣ Try Aggregator First (Only on Mainnet)
+        // The Aggregator SDK v1.4.3 currently throws "CetusRouter only supported on mainnet" 
+        // when executing routerSwap on Testnet. So we skip it on Testnet.
+        if (SUI_NETWORK === 'mainnet') {
+            console.log("Trying Aggregator...");
+            const router = await aggregator.findRouters({
+                from: fromCoinType,
+                target: toCoinType,
+                amount: amount,
+                byAmountIn: byAmountIn,
             });
-            return {
-                amountOut: router.amountOut,
-                estimatedFee: 0,
-                router: router, 
-                source: 'aggregator',
-                paths: router.paths ? router.paths.map((r: any) => ({ label: `Path`, steps: [] })) : [],
-                rawSwapResult: router
-            };
+
+            if (router) {
+                console.log("✅ Aggregator Route Found:", {
+                    amountOut: router.amountOut.toString(),
+                    splitPaths: router.paths?.length
+                });
+                return {
+                    amountOut: router.amountOut,
+                    estimatedFee: 0,
+                    router: router, 
+                    source: 'aggregator',
+                    paths: router.paths ? router.paths.map((r: any) => ({ label: `Path`, steps: [] })) : [],
+                    rawSwapResult: router
+                };
+            }
+        } else {
+            console.log("ℹ️ Skipping Aggregator on Testnet (Direct Pool Mode)");
         }
     } catch (error) {
         console.warn("⚠️ Aggregator failed, trying direct pool fallback...", error);
