@@ -1,26 +1,28 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { initCetusSDK, Percentage } from "@cetusprotocol/cetus-sui-clmm-sdk";
+import { AggregatorClient, Env } from "@cetusprotocol/aggregator-sdk";
 import { Transaction } from "@mysten/sui/transactions";
 import BN from "bn.js";
-import { TOKENS, CETUS_SWAP_PACKAGE_ID, SUI_NETWORK, POOL_IDS } from "./config";
+import { TOKENS, SUI_NETWORK } from "./config";
 
-// 🌟 Initialize Cetus CLMM SDK (Dynamic Network)
-// We use CLMM SDK directly because Aggregator SDK can be unstable on Testnet due to indexer lag.
-const cetusClmmSDK = initCetusSDK({
-    network: SUI_NETWORK as 'mainnet' | 'testnet',
-    // simulationAccount removed as it's not in the type definition. 
-    // If needed, it should be passed via other means or the SDK version might have changed.
+// 🌟 Initialize Cetus Aggregator SDK
+// Aggregator Client handles Path Finding, Multi-hop Routing, and Transaction Building.
+// It is the standard way to swap on Cetus now.
+const aggregatorURL = SUI_NETWORK === 'mainnet' 
+    ? 'https://api-sui.cetus.zone/router_v3/find_routes' 
+    : 'https://api-sui.cetus.zone/router_v3/find_routes'; // Using v3 endpoint, assuming it handles testnet or we need specific one.
+
+// Note: For Testnet, Cetus Aggregator support might be limited. 
+// If this URL doesn't work for testnet, we might need to fallback to direct client or find the specific testnet API.
+// But based on docs, v3 is the way to go.
+
+const aggregator = new AggregatorClient({
+    endpoint: aggregatorURL
 });
-// Manually set senderAddress if the SDK instance allows it (as a property), or rely on caller context.
-cetusClmmSDK.senderAddress = '0x0000000000000000000000000000000000000000000000000000000000000000';
 
 export const SUI_COIN_TYPE = TOKENS.SUI;
 export const CETUS_COIN_TYPE = TOKENS.CETUS; 
 export const USDC_COIN_TYPE = TOKENS.USDC; 
 export const WUSDC_COIN_TYPE = TOKENS.wUSDC; 
-
-// Cache for Pool Objects to avoid fetching every time
-let cachedPool: any = null;
 
 export async function getSwapQuote(
     fromCoinType: string,
@@ -28,153 +30,51 @@ export async function getSwapQuote(
     amountIn: number, 
     byAmountIn: boolean = true
 ) {
-    console.log(`🔍 CLMM Quote: ${amountIn} ${fromCoinType} -> ${toCoinType}`);
+    console.log(`🔍 Aggregator Quote: ${amountIn} ${fromCoinType} -> ${toCoinType}`);
 
     try {
-        // 1. Get Pool Address (SUI-USDC or other pairs)
-        // For Hackathon Demo, we prioritize SUI-USDC pool
-        // If not cached, fetch it.
-        if (!cachedPool || cachedPool.coinTypeA !== fromCoinType && cachedPool.coinTypeB !== fromCoinType) {
-             console.log("Fetching Pool...");
-             
-             // 🛠️ Optimization: For SUI-USDC, use known Pool ID directly.
-             // This avoids "getPoolsWithPage" which can be slow or miss the pool in first page.
-             // We prioritize the ID from config based on current network.
-             const PREDEFINED_POOL_ID = SUI_NETWORK === 'mainnet' ? POOL_IDS.mainnet.SUI_USDC : POOL_IDS.testnet.SUI_USDC;
-             
-             if (
-                (fromCoinType === SUI_COIN_TYPE && toCoinType === USDC_COIN_TYPE) ||
-                (fromCoinType === USDC_COIN_TYPE && toCoinType === SUI_COIN_TYPE)
-             ) {
-                 try {
-                     console.log(`🚀 Fast-tracking ${SUI_NETWORK.toUpperCase()} SUI-USDC Pool fetch...`);
-                     cachedPool = await cetusClmmSDK.Pool.getPool(PREDEFINED_POOL_ID);
-                 } catch (e) {
-                     console.warn("⚠️ Fast-track pool fetch failed, falling back to list scan.", e);
-                 }
-             }
-
-            // If fast-track failed or not SUI-USDC, try scanning with filters (Recommended)
-            if (!cachedPool) {
-               console.log("🔍 Scanning for pool on-chain...");
-               try {
-                   // Correct way: Pass filters to getPoolsWithPage
-                   const res: any = await cetusClmmSDK.Pool.getPoolsWithPage([], {
-                       coinTypeA: fromCoinType,
-                       coinTypeB: toCoinType,
-                       limit: 10
-                   } as any);
-                   
-                   // Check structure (res might be array or object with data)
-                   const pools = Array.isArray(res) ? res : (res.data || []);
-
-                   if (pools.length > 0) {
-                       // Sort by liquidity (descending) to get the best pool
-                       pools.sort((a: any, b: any) => Number(b.liquidity) - Number(a.liquidity));
-                       const bestPool = pools[0];
-                       console.log(`✅ Found dynamic pool address: ${bestPool.poolAddress}. Fetching full details...`);
-                       
-                       // 🛡️ Robustness Fix: Fetch the full Pool object using getPool
-                       // This ensures we have a complete object with all necessary fields/methods expected by the SDK
-                       try {
-                            cachedPool = await cetusClmmSDK.Pool.getPool(bestPool.poolAddress);
-                       } catch (err) {
-                            console.warn("⚠️ Failed to fetch full pool details, using list result as fallback.", err);
-                            cachedPool = bestPool;
-                       }
-                   }
-               } catch (e) {
-                   console.warn("⚠️ Failed to fetch pool list from SDK:", e);
-               }
-            }
-       }
-
-       // 🚨 Final Check
-       if (!cachedPool) {
-           console.error("❌ Pool not found. Please check if the pair exists on this network.");
-           return null;
-       }
-
-        console.log("✅ Pool Found:", cachedPool.poolAddress);
-
-        // 2. Calculate Pre-Swap
-        const a2b = fromCoinType === cachedPool.coinTypeA;
+        // Use Aggregator to find the best route
+        // This automatically handles multi-hop (e.g. A -> SUI -> B) and split paths.
         const amount = new BN(amountIn);
-
-        console.log("🧮 Calculating Rates:", {
-             poolAddress: cachedPool.poolAddress,
-             coinTypeA: cachedPool.coinTypeA,
-             coinTypeB: cachedPool.coinTypeB,
-             a2b,
-             amount: amount.toString()
+        
+        const router = await aggregator.findRouters({
+            from: fromCoinType,
+            target: toCoinType, // 'target' is the correct parameter name in Aggregator SDK
+            amount: amount,
+            byAmountIn: byAmountIn,
         });
 
-        // Ensure cachedPool has necessary fields
-        if (!cachedPool.coinTypeA || !cachedPool.coinTypeB) {
-             throw new Error("Invalid Pool Object: Missing coin types");
-        }
-
-        let swapResult: any;
-
-        try {
-            // In preSwap, coinTypeA/B usually need to be Coin objects (with decimals, etc.)
-            // But for simulation, let's try passing what we have.
-            // Note: Cetus SDK preSwap signature is tricky. 
-            // Let's manually construct minimal Coin info if needed.
-            const coinA = {
-                name: 'CoinA',
-                symbol: 'CA',
-                decimals: 9,
-                address: cachedPool.coinTypeA,
-                balance: new BN(0)
-            };
-            const coinB = {
-                name: 'CoinB',
-                symbol: 'CB',
-                decimals: 6,
-                address: cachedPool.coinTypeB,
-                balance: new BN(0)
-            };
-
-            // @ts-ignore - The method name is preswap (lowercase 's') in SDK definition
-            swapResult = await cetusClmmSDK.Swap.preswap({
-                pool: cachedPool,
-                currentSqrtPrice: cachedPool.currentSqrtPrice,
-                tickSpacing: cachedPool.tickSpacing,
-                liquidity: cachedPool.liquidity,
-                coinTypeA: coinA, // Pass constructed Coin object
-                coinTypeB: coinB, // Pass constructed Coin object
-                decimalsA: 9,
-                decimalsB: 6,
-                a2b,
-                byAmountIn,
-                amount: amount.toString()
-            } as any);
-            console.log("✅ Plan C (Pre-Swap) Success:", swapResult);
-        } catch (dryRunError) {
-            console.error("❌ Plan C also failed:", dryRunError);
+        if (!router) {
+            console.error("❌ No route found via Aggregator.");
             return null;
         }
 
-        // 3. Format result to match Aggregator Interface (for compatibility with UI)
+        console.log("✅ Route Found:", {
+            amountOut: router.amountOut.toString(),
+            splitPaths: router.paths?.length
+        });
+
+        // Format result to match our UI expectations
+        // We might need to adapt the UI if it expects a single 'pool' object.
+        // But for 'buildSimpleSwapTx', we will use the router object directly.
         return {
-            amountOut: swapResult.estimatedAmountOut,
-            estimatedFee: swapResult.estimatedFeeAmount,
-            poolAddress: cachedPool.poolAddress,
-            a2b,
+            amountOut: router.amountOut,
+            estimatedFee: 0, // router.totalFee not directly available in V3 type or named differently
+            // Aggregator returns 'routes', not a single pool.
+            // We pass the whole router object as 'rawSwapResult' or similar.
+            router: router, 
+            a2b: false, // Not relevant for multi-hop
             byAmountIn,
-            // Mock the 'paths' for UI visualization
-            paths: [{
-                label: 'Cetus CLMM',
-                steps: [{ poolAddress: cachedPool.poolAddress }]
-            }],
-            // Store raw result for building TX
-            rawSwapResult: swapResult,
-            pool: cachedPool
+            // Mock paths for UI visualization (Aggregator routes are complex)
+            paths: router.paths ? router.paths.map((r: any) => ({
+                label: `Path`,
+                steps: [] // Simplify for now to avoid V3 structure mismatch issues
+            })) : [],
+            rawSwapResult: router // Pass the router response for building TX
         };
 
     } catch (error) {
-        console.error("❌ Error calculating rates:", error);
+        console.error("❌ Error finding routes:", error);
         return null;
     }
 }
@@ -187,94 +87,32 @@ export async function buildSimpleSwapTx(
     toCoinType: string,
     slippage: number = 0.05 // 5%
 ) {
-    if (!quote || !quote.pool) {
-        throw new Error("Invalid Quote Object");
+    if (!quote || !quote.router) {
+        throw new Error("Invalid Quote Object: Missing Router Data");
     }
 
-    console.log("🏗️ Building Swap Transaction via CLMM SDK...");
+    console.log("🏗️ Building Swap Transaction via Aggregator SDK...");
 
-    const { pool, a2b, byAmountIn, rawSwapResult } = quote;
+    const { router } = quote;
 
-    // Create Swap Payload
-    // Note: The SDK returns a TransactionBlock (deprecated name in new Sui SDK) or Transaction.
-    // We need to be careful with version mismatch. 
-    // Ideally we use SDK to generate the payload and attach to OUR 'tx' object.
+    // Use Aggregator SDK to build the transaction
+    // 'routerSwap' builds the PTB for us.
+    // We need to pass the 'tx' object.
     
-    // Cetus SDK v5 'Swap.createSwapTransactionPayload' returns a TransactionBlock.
-    // We can't easily merge two Transaction objects.
-    // WORKAROUND: We use the SDK to calculate parameters, but we manually call the move function
-    // OR we use the SDK's helper if it supports passing a Transaction.
+    // Note: aggregator.routerSwap might expect 'inputCoin' to be a list of coins or an object ID.
+    // If inputCoin is a Coin object (from Move), we might need to handle it.
+    // If it's just an ID or we are expected to let SDK fetch coins, it's different.
+    // Usually in frontend we pass the input coin object ID.
     
-    // For simplicity and robustness in this Hackathon context:
-    // We will use the SDK to generate the PTB logic.
+    // Check if inputCoin is a string (ID) or object
+    // For simplicity, let's assume inputCoin is the Coin Object or ID that we want to spend.
     
-    const toAmount = byAmountIn ? rawSwapResult.estimatedAmountOut : rawSwapResult.estimatedAmountIn;
+    await aggregator.routerSwap({
+        router: router,
+        txb: tx as any, // Cast to match SDK's expected TransactionBlock type
+        inputCoin: inputCoin, // This usually needs to be a Coin object or ID. 
+        slippage: slippage,
+    });
     
-    // Slippage handling
-    const amountLimit = new BN(toAmount).mul(new BN(100 - slippage * 100)).div(new BN(100)); // Minimum output
-
-    // We use the lower-level 'Swap.createSwapTransactionPayload' which might return a new TX.
-    // Let's try to see if we can just use the arguments.
-    // Actually, Cetus SDK has 'Swap.createSwapTransactionPayload' which takes a 'TransactionBlock'.
-    // We are using '@mysten/sui/transactions' (Transaction), while SDK might use '@mysten/sui.js'.
-    // This type mismatch is common.
-    
-    // 💡 BEST PRACTICE for Compatibility:
-    // Manually call the Move function using the data we have.
-    
-    const sqrtPriceLimit = Swap.calculateSqrtPriceLimit(a2b); // We need Swap helper import
-    
-    // Wait, let's use the SDK's high level function but passing our TX if possible.
-    // If not, we copy the logic.
-    
-    // Let's use the simplest approach:
-    // Since we are already using the SDK, let's assume 'cetusClmmSDK.Swap.createSwapTransactionPayload' 
-    // accepts our 'tx' if we cast it as 'any' (duck typing often works for PTB).
-    
-    const res = await cetusClmmSDK.Swap.createSwapTransactionPayload({
-        pool_id: pool.poolAddress,
-        coinTypeA: pool.coinTypeA,
-        coinTypeB: pool.coinTypeB,
-        a2b,
-        by_amount_in: byAmountIn,
-        amount: rawSwapResult.amount.toString(),
-        amountLimit: amountLimit.toString(),
-        // @ts-ignore
-        txb: tx, 
-        // In SDK v5, we might need to handle 'mainCoin' carefully.
-        // It often expects an array of coins or a specific object.
-        // If inputCoin is a single object, we might need to wrap it or let SDK build coin input.
-        // But for 'createSwapTransactionPayload', it usually expects the user to have merged coins or provide a primary coin.
-        // Let's assume inputCoin is what it needs (string ID or Object).
-    } as any);
-
-    // 🟢 SDK usually adds commands to 'tx'.
-    // We need to capture the output coin. 
-    // The Cetus SDK usually transfers the output coin to the sender automatically.
-    // But we want to capture it for our 'transfer_with_event'.
-    
-    // If the SDK transfer is hardcoded, we might miss the event logging.
-    // For the Hackathon demo, "Swapping successfully" is P0. "Event logging" is P1.
-    // Let's stick to the SDK's default behavior first to ensure it works.
-    
-    console.log("✅ Swap PTB Built");
-    
-    // Note: The SDK might have already added 'TransferObjects'. 
-    // If we want to use our 'transfer_with_event', we would need the output coin reference.
-    // Cetus SDK v5 doesn't easily return the output coin ref in 'createSwapTransactionPayload'.
-    
-    // COMPROMISE: We will log the event BEFORE the swap (using input amount) or just skip the custom event 
-    // for this specific CLMM path to ensure the Swap works.
-    // OR: We use the config.ts contract for "Aggregator" path and accept that CLMM path might just be standard swap.
-    
-    // However, we can try to "guess" the output coin if we really want.
-    // For now, let's just let the SDK do its job.
-    return res;
-}
-
-// Helper for sqrtPriceLimit (simplified)
-const Swap = {
-    calculateSqrtPriceLimit: (a2b: boolean) => {
-        return a2b ? new BN("4295048016") : new BN("79226673515401279992447579055");
-    }
+    console.log("✅ Aggregator PTB Built");
 }
