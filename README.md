@@ -1,36 +1,31 @@
-# 🌊 SuiStream
+# 🌊 Cetus Swap Assistant (Sui Hackathon 2026)
 
-[![Sui Hackathon](https://img.shields.io/badge/Sui-Vibe_Hackathon_2026-blue)](https://deepsurge.io)
-[![StableLayer](https://img.shields.io/badge/Integrated-StableLayer-cyan)](https://stablelayer.site)
+[![Sui Hackathon](https://img.shields.io/badge/Sui-Vibe_Hackathon_2026-blue)](https://sui.io)
 [![Cetus](https://img.shields.io/badge/Integrated-Cetus_Aggregator-orange)](https://cetus.zone)
+[![zkLogin](https://img.shields.io/badge/Auth-zkLogin-green)](https://docs.sui.io/concepts/cryptography/zklogin)
 
-**SuiStream** (formerly SuiPay) is the next-generation financial operating system for Web3 merchants. It transforms static payments into a dynamic stream of yield.
+A streamlined, "Best Price" Swap dApp built on **Sui**, powered by **Cetus Aggregator SDK**, and featuring **zkLogin** for frictionless onboarding.
 
-> **"Stream Money. Earn Yield. Zero Friction."**
+> **"Swap Tokens. Best Price. Zero Friction."**
 
 ---
 
-## 🌟 The Vibe & The Solution
+## 🌟 Key Features (Hackathon Tracks)
 
-We are building on **Sui** because only Sui provides the speed and composability (PTB) to make money programmable.
+### 1. 🐬 Cetus Track: Aggregator Integration
+- **Problem**: Users struggle to find the best exchange rates across multiple DEXs.
+- **Solution**: We integrated the **Cetus Aggregator SDK** to automatically find and route trades through the most efficient liquidity pools.
+- **Implementation**: Real-time quote fetching, multi-hop routing visualization, and one-click execution.
 
-### 1. 💰 The "Idle Capital" Problem (StableLayer Track)
-Merchants receive stablecoins that sit idle in wallets, losing value to inflation.
--   **SuiStream Solution**: **Intent-based Auto-Yield**.
--   **How it works**: Merchants toggle "Auto-Yield" on their dashboard. Our smart contract signals this intent via events. Off-chain keepers automatically route funds into **StableLayer** protocol.
--   **Result**: Your payment terminal is now a high-yield savings account (~12% APY).
+### 2. 🔐 Consumer Track: zkLogin Onboarding
+- **Problem**: Creating a wallet and managing seed phrases is a barrier for Web2 users.
+- **Solution**: Integrated **Google Login** via zkLogin.
+- **Implementation**: Users can sign in with their Google account to instantly get a Sui address and start swapping.
 
-### 2. 💱 The "Token Mismatch" Problem (Cetus Track)
-Employees want SUI, but merchants hold USDC.
--   **SuiStream Solution**: **Payroll Swap Aggregation**.
--   **How it works**: Integrated **Cetus Aggregator SDK**. When running payroll, merchants can pay with ANY token. We automatically find the best route and execute the swap + distribution in a **single atomic PTB**.
--   **Result**: Pay 100 employees in their preferred token with one click.
-
-### 3. 🚧 The "Onboarding" Problem (Consumer Track)
-Web2 merchants don't have wallets.
--   **SuiStream Solution**: **Zero-Knowledge Onboarding**.
--   **How it works**: Full **zkLogin** integration. Sign in with Google. No seed phrases.
--   **Result**: Web2 experience, Web3 power.
+### 3. 💧 Modern UX/UI
+- Real-time balance updates.
+- "MAX" button for easy inputs (gas optimized).
+- Clear routing visualization.
 
 ---
 
@@ -38,72 +33,60 @@ Web2 merchants don't have wallets.
 
 | Component | Technology |
 | :--- | :--- |
-| **Smart Contracts** | **Move 2024** (Object-centric design) |
-| **DeFi Integrations** | **StableLayer** (Yield), **Cetus** (Swap/Aggregator) |
-| **Frontend** | Next.js 14, Tailwind, **Sui dApp Kit**, Recharts |
-| **Backend** | Rust (Axum, SQLx), PostgreSQL |
-| **Indexer** | Custom Rust Indexer (Event-driven architecture) |
+| **Smart Contracts** | **Move 2024** (Helper module for on-chain events) |
+| **DeFi Integration** | **Cetus Aggregator SDK** |
+| **Authentication** | **zkLogin** (Google OAuth + Ephemeral Keys) |
+| **Frontend** | **Next.js 14**, Tailwind CSS, **Sui dApp Kit** |
 
 ---
 
 ## 📂 Project Structure
 
 ```text
-sui_hackathon/
+sui-hack/
 ├── contracts/       # Sui Move contracts (v2024 edition)
-├── backend/         # Rust Axum server & Indexer
-├── frontend/        # Next.js Dashboard & Checkout Terminal
-└── SUBMISSION.md    # Detailed hackathon submission docs
+│   └── suipay/      # SwapHelper module
+├── frontend/        # Next.js dApp
+│   ├── src/app/     # Pages (Swap, Auth Callback)
+│   └── src/utils/   # SDK wrappers (Cetus, zkLogin)
+└── AI_DISCLOSURE.md # Mandatory AI Usage Disclosure
 ```
 
 ---
 
-## 🏁 Quick Start for Judges
+## 🚀 Quick Start (Deployment & Running)
 
-### 1. Database Setup
-```bash
-# Ensure PostgreSQL is running
-psql -d suistream -f backend/schema.sql
-```
+### Prerequisites
+- Node.js v18+
+- Sui CLI (optional, for contract deployment)
 
-### 2. Deploy Contract
+### 1. Run Frontend (dApp)
+The frontend is the core of this submission.
+
+1. Configure Environment:
+   ```bash
+   cp .env.local.example .env.local
+   # Edit .env.local with your Contract ID and Google Client ID
+   ```
+
+2. Install & Run:
+   ```bash
+   cd frontend
+   npm install
+   npm run dev
+   # Open http://localhost:3000
+   ```
+
+### 2. (Optional) Deploy Contracts
+The dApp works with pure SDK logic, but you can deploy the helper contract for on-chain event logging.
+
 ```bash
-cd contracts/suipay
+cd contracts/cetus_swap
+sui move build
 sui client publish --gas-budget 100000000
-# Update the Package ID in backend/.env
-```
-
-### 3. Run Backend (Rust)
-```bash
-cd backend
-# Edit .env with your DATABASE_URL and SUIPAY_PACKAGE_ID
-cargo run
-# Server runs on localhost:3002
-```
-
-### 4. Run Frontend (Next.js)
-```bash
-cd frontend
-npm install
-npm run dev
-# App runs on localhost:3000
 ```
 
 ---
 
-## 🏆 Hackathon Tracks Targeted
-
-### 1. StableLayer Track 🌊
-We implemented a complete **Merchant Yield System**. Instead of building another DEX, we built a **source of TVL** for StableLayer. We bring real merchant cash flow into the protocol.
-
-### 2. Cetus Track 🐬
-We integrated **Cetus Aggregator** directly into the Payroll flow. This demonstrates a high-value use case for aggregators: **B2B Bulk Payments**.
-
-### 3. Sui Tech Stack (Vibe) ⚡
--   **Move 2024**: Used latest syntax.
--   **PTB**: Used for batch payroll (SplitCoins + TransferObjects).
--   **zkLogin**: Used for seamless onboarding.
-
----
-
-Built with ❤️ for the **Sui Vibe Hackathon 2026**.
+## 📜 License
+MIT License. Open Source for the Sui Community.
