@@ -114,38 +114,47 @@ export async function getSwapQuote(
              throw new Error("Invalid Pool Object: Missing coin types");
         }
 
-        const swapResult = await cetusClmmSDK.Swap.calculateRates({
-            decimalsA: 9, // SUI
-            decimalsB: 6, // USDC
-            a2b,
-            byAmountIn,
-            amount,
-            // 🚨 Critical Fix for Runtime Error:
-            // SDK v5 seems to try to access properties (like coinTypeA) directly on the 'pool' object passed here.
-            // If cachedPool is a plain JSON object (from API/Indexer), it might be missing methods or prototype chain.
-            // However, the error "Cannot read properties of undefined (reading 'coinTypeA')" suggests
-            // that INSIDE SDK, it does something like `params.pool.coinTypeA`.
-            // BUT, we are passing `pool: cachedPool`.
-            // Wait, look at previous error: `TypeError: Cannot read properties of undefined (reading 'coinTypeA')`
-            // This stack trace `at oy.calculateRates` implies `this.pool` or similar is undefined, OR
-            // the `pool` passed in the object is somehow not being read correctly if we just pass `pool`.
-            
-            // Let's go back to spreading the properties.
-            // Even though TS complained 'currentSqrtPrice' does not exist in type,
-            // JS runtime REQUIRES these fields if we don't pass a full Pool instance.
-            // The SDK likely checks: if (params.pool) use pool; else use params.currentSqrtPrice etc.
-            
-            // Let's Construct a "Pool-like" object that satisfies the SDK's expectations at runtime.
-            // Or better, just spread the properties and ignore TS errors, as that's what worked logically before types blocked us.
-            
-            currentSqrtPrice: cachedPool.currentSqrtPrice,
-            tickSpacing: cachedPool.tickSpacing,
-            liquidity: cachedPool.liquidity,
-            coinTypeA: cachedPool.coinTypeA,
-            coinTypeB: cachedPool.coinTypeB
-        } as any);
+        let swapResult: any;
 
-        console.log("✅ Swap Result:", swapResult);
+        try {
+            // In preSwap, coinTypeA/B usually need to be Coin objects (with decimals, etc.)
+            // But for simulation, let's try passing what we have.
+            // Note: Cetus SDK preSwap signature is tricky. 
+            // Let's manually construct minimal Coin info if needed.
+            const coinA = {
+                name: 'CoinA',
+                symbol: 'CA',
+                decimals: 9,
+                address: cachedPool.coinTypeA,
+                balance: new BN(0)
+            };
+            const coinB = {
+                name: 'CoinB',
+                symbol: 'CB',
+                decimals: 6,
+                address: cachedPool.coinTypeB,
+                balance: new BN(0)
+            };
+
+            // @ts-ignore - The method name is preswap (lowercase 's') in SDK definition
+            swapResult = await cetusClmmSDK.Swap.preswap({
+                pool: cachedPool,
+                currentSqrtPrice: cachedPool.currentSqrtPrice,
+                tickSpacing: cachedPool.tickSpacing,
+                liquidity: cachedPool.liquidity,
+                coinTypeA: coinA, // Pass constructed Coin object
+                coinTypeB: coinB, // Pass constructed Coin object
+                decimalsA: 9,
+                decimalsB: 6,
+                a2b,
+                byAmountIn,
+                amount: amount.toString()
+            } as any);
+            console.log("✅ Plan C (Pre-Swap) Success:", swapResult);
+        } catch (dryRunError) {
+            console.error("❌ Plan C also failed:", dryRunError);
+            return null;
+        }
 
         // 3. Format result to match Aggregator Interface (for compatibility with UI)
         return {
