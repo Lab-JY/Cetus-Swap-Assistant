@@ -22,8 +22,10 @@ This project includes a production-ready `Dockerfile` optimized for Next.js stan
 2. **New Project**: Go to [Railway Dashboard](https://railway.app/new) -> "Deploy from GitHub repo".
 3. **Configure**:
    - Select your repo.
-   - **Root Directory**: Go to Settings -> General -> Root Directory, set to `/frontend`.
-   - Railway will automatically detect the `Dockerfile` in `/frontend`.
+   - **Important**: Do NOT set "Root Directory" to `/frontend` if you are using `railway.json`.
+   - Instead, let Railway use the root context, but specify the Dockerfile path in `railway.json`.
+   - If you manually set Root Directory to `/frontend`, Docker might fail to find files because the context is shifted.
+   - **Recommended**: Leave Root Directory as `/` (default) and use the `railway.json` included in this repo.
 4. **Variables**:
    - Go to the "Variables" tab.
    - Add the variables listed below.
