@@ -63,7 +63,7 @@ export async function getSwapQuote(
                        coinTypeA: fromCoinType,
                        coinTypeB: toCoinType,
                        limit: 10
-                   });
+                   } as any);
                    
                    // Check structure (res might be array or object with data)
                    const pools = Array.isArray(res) ? res : (res.data || []);
