@@ -27,6 +27,7 @@ This project includes a production-ready `Dockerfile` optimized for Next.js stan
 4. **Variables**:
    - Go to the "Variables" tab.
    - Add the variables listed below.
+   - **Important**: In Railway, build-time variables (ARG) must also be set in the Variables tab.
 5. **Domain**:
    - Go to Settings -> Networking -> Generate Domain (e.g., `xxx.up.railway.app`).
    - Update `NEXT_PUBLIC_APP_URL` variable with this new domain.

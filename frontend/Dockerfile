@@ -10,6 +10,18 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
+# ⚠️ Fix: Ensure environment variables are available during build time
+# Some Next.js builds fail if these are missing, even if they are public.
+ARG NEXT_PUBLIC_SUI_NETWORK
+ARG NEXT_PUBLIC_CETUS_SWAP_PACKAGE_ID
+ARG NEXT_PUBLIC_GOOGLE_CLIENT_ID
+ARG NEXT_PUBLIC_APP_URL
+
+ENV NEXT_PUBLIC_SUI_NETWORK=$NEXT_PUBLIC_SUI_NETWORK
+ENV NEXT_PUBLIC_CETUS_SWAP_PACKAGE_ID=$NEXT_PUBLIC_CETUS_SWAP_PACKAGE_ID
+ENV NEXT_PUBLIC_GOOGLE_CLIENT_ID=$NEXT_PUBLIC_GOOGLE_CLIENT_ID
+ENV NEXT_PUBLIC_APP_URL=$NEXT_PUBLIC_APP_URL
+
 # Next.js collects completely anonymous telemetry data about general usage.
 # Learn more here: https://nextjs.org/telemetry
 # Uncomment the following line in case you want to disable telemetry during the build.
