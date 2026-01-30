@@ -2,24 +2,20 @@ module cetus_swap::swap_helper;
 
 use sui::coin::Coin;
 use sui::event;
-use sui::object::{Self, UID};
-use sui::table::{Self, Table};
-use sui::tx_context::{Self, TxContext};
-use sui::transfer;
-use std::type_name::{Self, TypeName};
+use sui::table;
+use std::type_name;
 use std::ascii;
-use std::vector;
 
 /// Capability for managing the swap registry
 public struct AdminCap has key {
-    id: UID,
+    id: sui::object::UID,
 }
 
 /// Swap record stored on-chain
 public struct SwapRecord has store, copy, drop {
     user: address,
-    from_coin: TypeName,
-    to_coin: TypeName,
+    from_coin: ascii::String,
+    to_coin: ascii::String,
     amount_in: u64,
     amount_out: u64,
     timestamp: u64,
@@ -35,9 +31,9 @@ public struct UserStats has store {
 
 /// Global swap registry
 public struct SwapRegistry has key {
-    id: UID,
-    swap_records: Table<u64, SwapRecord>,
-    user_stats: Table<address, UserStats>,
+    id: sui::object::UID,
+    swap_records: table::Table<u64, SwapRecord>,
+    user_stats: table::Table<address, UserStats>,
     total_swaps: u64,
     total_volume: u64,
 }
@@ -67,7 +63,7 @@ public struct RegistryInitialized has copy, drop {
 }
 
 /// Initialize the swap registry (called once)
-public entry fun init_registry(ctx: &mut TxContext) {
+public entry fun init_registry(ctx: &mut sui::tx_context::TxContext) {
     let admin_cap = AdminCap {
         id: object::new(ctx),
     };
@@ -95,12 +91,12 @@ public entry fun execute_swap<T>(
     recipient: address,
     amount_out: u64,
     registry: &mut SwapRegistry,
-    to_coin_type: TypeName,
-    ctx: &mut TxContext
+    to_coin_type: ascii::String,
+    ctx: &mut sui::tx_context::TxContext
 ) {
     let sender = tx_context::sender(ctx);
     let amount_in = coin.value();
-    let from_coin_type = type_name::get<T>();
+    let from_coin_type = type_name::get<T>().into_string();
     let timestamp = tx_context::epoch(ctx);
 
     // Create swap record
@@ -153,8 +149,8 @@ public entry fun execute_swap<T>(
     // Emit swap event
     event::emit(SwapEvent {
         user: sender,
-        from_coin: from_coin_type.into_string(),
-        to_coin: to_coin_type.into_string(),
+        from_coin: from_coin_type,
+        to_coin: to_coin_type,
         amount_in,
         amount_out,
         timestamp,
@@ -186,7 +182,7 @@ public fun get_registry_stats(registry: &SwapRegistry): (u64, u64) {
 public entry fun transfer_with_event<T>(
     coin: Coin<T>,
     recipient: address,
-    ctx: &TxContext
+    ctx: &sui::tx_context::TxContext
 ) {
     let amount = coin.value();
     let type_name = type_name::get<T>();
