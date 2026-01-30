@@ -1,23 +1,19 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { AggregatorClient, Env } from "@cetusprotocol/aggregator-sdk";
+import { initCetusSDK, TickMath } from "@cetusprotocol/cetus-sui-clmm-sdk";
 import { Transaction } from "@mysten/sui/transactions";
 import BN from "bn.js";
-import { TOKENS, SUI_NETWORK } from "./config";
+import { TOKENS, SUI_NETWORK, POOL_IDS } from "./config";
 
 // 🌟 Initialize Cetus Aggregator SDK
-// Aggregator Client handles Path Finding, Multi-hop Routing, and Transaction Building.
-// It is the standard way to swap on Cetus now.
-const aggregatorURL = SUI_NETWORK === 'mainnet' 
-    ? 'https://api-sui.cetus.zone/router_v3/find_routes' 
-    : 'https://api-sui.cetus.zone/router_v3/find_routes'; // Using v3 endpoint, assuming it handles testnet or we need specific one.
-
-// Note: For Testnet, Cetus Aggregator support might be limited. 
-// If this URL doesn't work for testnet, we might need to fallback to direct client or find the specific testnet API.
-// But based on docs, v3 is the way to go.
-
 const aggregator = new AggregatorClient({
-    endpoint: aggregatorURL,
+    endpoint: SUI_NETWORK === 'mainnet' ? 'https://api-sui.cetus.zone/router_v3/find_routes' : undefined,
     env: SUI_NETWORK === 'mainnet' ? Env.Mainnet : Env.Testnet
+});
+
+// 🌟 Initialize Cetus CLMM SDK (Fallback)
+const cetusClmm = initCetusSDK({
+    network: SUI_NETWORK === 'mainnet' ? 'mainnet' : 'testnet'
 });
 
 export const SUI_COIN_TYPE = TOKENS.SUI;
@@ -31,51 +27,86 @@ export async function getSwapQuote(
     amountIn: number, 
     byAmountIn: boolean = true
 ) {
-    console.log(`🔍 Aggregator Quote: ${amountIn} ${fromCoinType} -> ${toCoinType}`);
+    console.log(`🔍 Quote: ${amountIn} ${fromCoinType} -> ${toCoinType}`);
+    const amount = new BN(amountIn);
 
     try {
-        // Use Aggregator to find the best route
-        // This automatically handles multi-hop (e.g. A -> SUI -> B) and split paths.
-        const amount = new BN(amountIn);
-        
+        // 1️⃣ Try Aggregator First
+        console.log("Trying Aggregator...");
         const router = await aggregator.findRouters({
             from: fromCoinType,
-            target: toCoinType, // 'target' is the correct parameter name in Aggregator SDK
+            target: toCoinType,
             amount: amount,
             byAmountIn: byAmountIn,
         });
 
-        if (!router) {
-            console.error("❌ No route found via Aggregator.");
+        if (router) {
+            console.log("✅ Aggregator Route Found:", {
+                amountOut: router.amountOut.toString(),
+                splitPaths: router.paths?.length
+            });
+            return {
+                amountOut: router.amountOut,
+                estimatedFee: 0,
+                router: router, 
+                source: 'aggregator',
+                paths: router.paths ? router.paths.map((r: any) => ({ label: `Path`, steps: [] })) : [],
+                rawSwapResult: router
+            };
+        }
+    } catch (error) {
+        console.warn("⚠️ Aggregator failed, trying direct pool fallback...", error);
+    }
+
+    // 2️⃣ Fallback to Direct Pool (CLMM)
+    try {
+        console.log("Trying Direct Pool Fallback...");
+        // Identify Pool ID based on token pair (Simplified for SUI-USDC demo)
+        let poolAddress = '';
+        if ((fromCoinType === TOKENS.SUI && toCoinType === TOKENS.USDC) || 
+            (fromCoinType === TOKENS.USDC && toCoinType === TOKENS.SUI)) {
+            poolAddress = POOL_IDS[SUI_NETWORK === 'mainnet' ? 'mainnet' : 'testnet'].SUI_USDC;
+        }
+
+        if (!poolAddress) {
+            console.error("❌ No direct pool configured for this pair.");
             return null;
         }
 
-        console.log("✅ Route Found:", {
-            amountOut: router.amountOut.toString(),
-            splitPaths: router.paths?.length
+        const pool = await cetusClmm.Pool.getPool(poolAddress);
+        // Use preswap which handles tick fetching or simple estimation
+        const res = await cetusClmm.Swap.preswap({
+            pool: pool,
+            currentSqrtPrice: pool.current_sqrt_price,
+            decimalsA: 9,
+            decimalsB: 6,
+            a2b: fromCoinType === TOKENS.SUI,
+            byAmountIn: byAmountIn,
+            amount: amount.toString(),
+            coinTypeA: pool.coinTypeA,
+            coinTypeB: pool.coinTypeB
         });
 
-        // Format result to match our UI expectations
-        // We might need to adapt the UI if it expects a single 'pool' object.
-        // But for 'buildSimpleSwapTx', we will use the router object directly.
+        if (!res) {
+            console.error("❌ Direct Pool Quote returned null");
+            return null;
+        }
+
+        console.log("✅ Direct Pool Quote Found:", res.estimatedAmountOut.toString());
+
         return {
-            amountOut: router.amountOut,
-            estimatedFee: 0, // router.totalFee not directly available in V3 type or named differently
-            // Aggregator returns 'routes', not a single pool.
-            // We pass the whole router object as 'rawSwapResult' or similar.
-            router: router, 
-            a2b: false, // Not relevant for multi-hop
-            byAmountIn,
-            // Mock paths for UI visualization (Aggregator routes are complex)
-            paths: router.paths ? router.paths.map((r: any) => ({
-                label: `Path`,
-                steps: [] // Simplify for now to avoid V3 structure mismatch issues
-            })) : [],
-            rawSwapResult: router // Pass the router response for building TX
+            amountOut: new BN(res.estimatedAmountOut),
+            estimatedFee: res.estimatedFeeAmount,
+            router: null,
+            source: 'clmm',
+            poolAddress: poolAddress,
+            a2b: fromCoinType === TOKENS.SUI,
+            paths: [{ label: 'Direct Pool', steps: [] }],
+            rawSwapResult: res
         };
 
     } catch (error) {
-        console.error("❌ Error finding routes:", error);
+        console.error("❌ Error finding direct quote:", error);
         return null;
     }
 }
@@ -86,34 +117,47 @@ export async function buildSimpleSwapTx(
     inputCoin: any,
     userAddress: string,
     toCoinType: string,
-    slippage: number = 0.05 // 5%
-) {
-    if (!quote || !quote.router) {
-        throw new Error("Invalid Quote Object: Missing Router Data");
+    slippage: number = 0.05
+): Promise<Transaction> {
+    if (!quote) throw new Error("Invalid Quote Object");
+
+    console.log(`🏗️ Building Swap Transaction via ${quote.source === 'aggregator' ? 'Aggregator' : 'CLMM'}...`);
+
+    if (quote.source === 'aggregator') {
+        const { router } = quote;
+        await aggregator.routerSwap({
+            router: router,
+            txb: tx as any,
+            inputCoin: inputCoin,
+            slippage: slippage,
+        });
+        return tx;
+    } else {
+        // CLMM Direct Swap
+        const pool = await cetusClmm.Pool.getPool(quote.poolAddress);
+        const toAmount = new BN(quote.amountOut);
+        const amountLimit = adjustForSlippage(toAmount, slippage, !quote.a2b);
+
+        // createSwapTransactionPayload creates a NEW transaction
+        const newTx = await cetusClmm.Swap.createSwapTransactionPayload({
+            pool_id: pool.poolAddress,
+            a2b: quote.a2b,
+            by_amount_in: quote.rawSwapResult.byAmountIn,
+            amount: quote.rawSwapResult.amount,
+            amount_limit: amountLimit.toString(), 
+            coinTypeA: pool.coinTypeA,
+            coinTypeB: pool.coinTypeB,
+        });
+        return newTx;
     }
+}
 
-    console.log("🏗️ Building Swap Transaction via Aggregator SDK...");
-
-    const { router } = quote;
-
-    // Use Aggregator SDK to build the transaction
-    // 'routerSwap' builds the PTB for us.
-    // We need to pass the 'tx' object.
-    
-    // Note: aggregator.routerSwap might expect 'inputCoin' to be a list of coins or an object ID.
-    // If inputCoin is a Coin object (from Move), we might need to handle it.
-    // If it's just an ID or we are expected to let SDK fetch coins, it's different.
-    // Usually in frontend we pass the input coin object ID.
-    
-    // Check if inputCoin is a string (ID) or object
-    // For simplicity, let's assume inputCoin is the Coin Object or ID that we want to spend.
-    
-    await aggregator.routerSwap({
-        router: router,
-        txb: tx as any, // Cast to match SDK's expected TransactionBlock type
-        inputCoin: inputCoin, // This usually needs to be a Coin object or ID. 
-        slippage: slippage,
-    });
-    
-    console.log("✅ Aggregator PTB Built");
+function adjustForSlippage(amount: BN, slippage: number, isMax: boolean): BN {
+    const slippageBN = new BN(Math.floor(slippage * 10000));
+    const base = new BN(10000);
+    if (isMax) {
+        return amount.mul(base.add(slippageBN)).div(base);
+    } else {
+        return amount.mul(base.sub(slippageBN)).div(base);
+    }
 }

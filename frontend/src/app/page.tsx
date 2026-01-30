@@ -146,12 +146,17 @@ export default function SwapPage() {
         }
       }
 
-      await buildSimpleSwapTx(tx, quote, inputCoin, currentAddress, toToken.type);
+      const finalTx = await buildSimpleSwapTx(tx, quote, inputCoin, currentAddress, toToken.type);
+
+      // Ensure gas budget is set if needed (especially for SUI swaps)
+      if (fromToken.symbol === 'SUI') {
+          finalTx.setGasBudget(100000000);
+      }
 
       if (account) {
           // 🟢 Wallet Adapter Mode
           signAndExecuteTransaction(
-            { transaction: tx },
+            { transaction: finalTx },
             {
               onSuccess: (result) => {
                 console.log('Swap Success:', result);
