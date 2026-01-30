@@ -5,7 +5,7 @@ import { ConnectButton, useCurrentAccount, useSignAndExecuteTransaction, useSuiC
 import { Transaction } from '@mysten/sui/transactions';
 import { SUI_COIN_TYPE, USDC_COIN_TYPE, CETUS_COIN_TYPE, WUSDC_COIN_TYPE, getSwapQuote, buildSimpleSwapTx } from '@/utils/cetus';
 import Image from 'next/image';
-import { RefreshCcw, ArrowDownUp, Wallet, LogOut } from 'lucide-react';
+import { RefreshCcw, ArrowDownUp, Wallet, LogOut, Copy } from 'lucide-react';
 import { getGoogleLoginUrl, clearZkLoginSession } from '@/utils/zklogin';
 
 const TOKENS_LIST = [
@@ -43,7 +43,9 @@ export default function SwapPage() {
     setZkLoginAddress(null);
   };
 
-  const currentAddress = account?.address || zkLoginAddress;
+  // ⚠️ Priority: zkLogin > Wallet
+  // If user logs in with Google, we show that account even if wallet is connected.
+  const currentAddress = zkLoginAddress || account?.address;
 
   const [fromToken, setFromToken] = useState(TOKENS_LIST[0]); // Default SUI
   const [toToken, setToToken] = useState(TOKENS_LIST[1]);   // Default USDC
@@ -200,10 +202,20 @@ export default function SwapPage() {
             {currentAddress && (
                <div className="flex gap-2 items-center">
                   {zkLoginAddress ? (
-                      <div className="flex items-center gap-2 bg-white/10 px-3 py-1.5 rounded-lg border border-white/20">
+                      <div className="flex items-center gap-2 bg-white/10 px-3 py-1.5 rounded-lg border border-white/20 relative group">
                           <Image src="https://upload.wikimedia.org/wikipedia/commons/c/c1/Google_%22G%22_logo.svg" alt="G" width={16} height={16} />
-                          <span className="text-sm font-mono">{zkLoginAddress.slice(0, 4)}...{zkLoginAddress.slice(-4)}</span>
-                          <button onClick={handleLogout} className="ml-2 hover:text-red-300"><LogOut size={14}/></button>
+                          <div className="flex flex-col text-left">
+                              <span className="text-[10px] text-blue-200 leading-none">Demo Wallet</span>
+                              <span className="text-sm font-mono">{zkLoginAddress.slice(0, 4)}...{zkLoginAddress.slice(-4)}</span>
+                          </div>
+                          <button 
+                            onClick={() => navigator.clipboard.writeText(zkLoginAddress)}
+                            className="ml-2 text-white/50 hover:text-white transition-colors"
+                            title="Copy Full Address"
+                          >
+                              <Copy size={14}/>
+                          </button>
+                          <button onClick={handleLogout} className="ml-1 text-white/50 hover:text-red-300 transition-colors"><LogOut size={14}/></button>
                       </div>
                   ) : (
                       <ConnectButton />

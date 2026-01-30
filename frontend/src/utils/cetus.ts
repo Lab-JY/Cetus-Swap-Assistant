@@ -16,7 +16,8 @@ const aggregatorURL = SUI_NETWORK === 'mainnet'
 // But based on docs, v3 is the way to go.
 
 const aggregator = new AggregatorClient({
-    endpoint: aggregatorURL
+    endpoint: aggregatorURL,
+    env: SUI_NETWORK === 'mainnet' ? Env.Mainnet : Env.Testnet
 });
 
 export const SUI_COIN_TYPE = TOKENS.SUI;
