@@ -2,70 +2,77 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Loader2, CheckCircle2 } from 'lucide-react';
+import { jwtDecode } from 'jwt-decode';
+import { RANDOMNESS_SESSION_KEY, MAX_EPOCH_KEY } from '@/utils/zklogin';
+import { jwtToAddress } from '@mysten/zklogin';
 
 export default function AuthCallback() {
   const router = useRouter();
-  const [status, setStatus] = useState('Verifying your identity...');
+  const [status, setStatus] = useState('Processing login...');
 
   useEffect(() => {
-    const handleCallback = async () => {
-      // 1. 从 URL Hash 中解析 id_token (Google OAuth 2.0 返回方式)
-      const hash = window.location.hash.substring(1);
-      const params = new URLSearchParams(hash);
-      const idToken = params.get('id_token');
+    const handleLogin = async () => {
+      // 1. Get ID Token from URL fragment
+      const hashParams = new URLSearchParams(window.location.hash.slice(1));
+      const idToken = hashParams.get('id_token');
 
       if (!idToken) {
-        setStatus('Error: No ID token found.');
+        setStatus('Error: No ID Token found');
         return;
       }
 
       try {
-        // 2. 将 JWT 发给后端进行验证并派生 Sui 地址
-        const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3002';
-        const res = await fetch(`${apiUrl}/auth/zklogin/verify`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ jwt: idToken }),
-        });
+        // 2. Decode JWT to get 'sub' (Subject ID)
+        const decodedJwt = jwtDecode<{ sub: string }>(idToken);
+        
+        // 3. Get Ephemeral Data from Session
+        const randomness = window.sessionStorage.getItem(RANDOMNESS_SESSION_KEY);
+        const maxEpoch = window.sessionStorage.getItem(MAX_EPOCH_KEY);
+        
+        if (!randomness || !maxEpoch) {
+           setStatus('Error: Session expired. Please login again.');
+           setTimeout(() => router.push('/'), 2000);
+           return;
+        }
 
-        if (!res.ok) throw new Error('Backend verification failed');
+        // 4. Generate User Salt (Simplified for Hackathon: Hash of sub)
+        // ⚠️ IN PRODUCTION: You must store this mapping in a backend DB or use a service like Enoki
+        // Here we deterministically derive salt from 'sub' to keep the same address for the same user.
+        // This leaks linkability but is fine for pure client-side demo.
+        const userSalt = BigInt(
+           '0x' + Array.from(decodedJwt.sub)
+             .map((c) => c.charCodeAt(0).toString(16))
+             .join('')
+        ) + BigInt('1234567890'); // Simple deterministic salt
+
+        // 5. Derive zkLogin Address
+        const zkLoginAddress = jwtToAddress(idToken, userSalt);
         
-        const data = await res.json();
+        // 6. Store everything in Session Storage for the main page to use
+        window.sessionStorage.setItem('zklogin_jwt', idToken);
+        window.sessionStorage.setItem('zklogin_salt', userSalt.toString());
+        window.sessionStorage.setItem('zklogin_address', zkLoginAddress);
         
-        // 3. 存储返回的正式 JWT 和 Sui 地址
-        localStorage.setItem('suistream_token', data.token);
-        localStorage.setItem('suistream_address', data.sui_address);
-        
-        setStatus('Login Successful! Redirecting...');
-        
-        // 4. 跳转回控制台
-        setTimeout(() => router.push('/'), 1500);
-      } catch (err: any) {
-        console.error(err);
-        setStatus('Authentication Error: ' + err.message);
+        setStatus(`Login Successful! Redirecting to ${zkLoginAddress.slice(0, 6)}...`);
+        setTimeout(() => router.push('/'), 1000);
+
+      } catch (e: unknown) {
+        console.error(e);
+        setStatus(`Error: ${e instanceof Error ? e.message : String(e)}`);
       }
     };
 
-    handleCallback();
+    handleLogin();
   }, [router]);
 
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-4">
-      <div className="bg-white p-8 rounded-3xl shadow-xl max-w-sm w-full text-center">
-        {status.includes('Error') ? (
-          <div className="text-red-500 font-bold">{status}</div>
-        ) : status.includes('Successful') ? (
-          <div className="flex flex-col items-center gap-4 text-green-600">
-            <CheckCircle2 size={48} className="animate-bounce" />
-            <p className="font-bold text-lg">{status}</p>
-          </div>
-        ) : (
-          <div className="flex flex-col items-center gap-4 text-blue-600">
-            <Loader2 size={48} className="animate-spin" />
-            <p className="font-medium text-slate-500">{status}</p>
-          </div>
-        )}
+    <div className="min-h-screen flex items-center justify-center bg-gray-50">
+      <div className="bg-white p-8 rounded-xl shadow-lg text-center">
+        <h2 className="text-xl font-bold mb-4">zkLogin Verification</h2>
+        <div className="animate-pulse text-blue-600 mb-4">
+           🔐 Verifying Google Credentials...
+        </div>
+        <p className="text-gray-600">{status}</p>
       </div>
     </div>
   );

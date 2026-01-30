@@ -1,339 +1,362 @@
 'use client';
 
-import { ConnectButton, useCurrentAccount, useSignPersonalMessage, useSignAndExecuteTransaction, useSuiClientQuery } from '@mysten/dapp-kit';
-import { Wallet, CreditCard, Users, ArrowUpRight, BarChart3, ShieldCheck, LogIn, TrendingUp, Power, Chrome, Apple, Loader2, Sparkles } from 'lucide-react';
-import Link from 'next/link';
 import { useState, useEffect } from 'react';
-import { generateNonce, generateRandomness } from '@mysten/zklogin';
+import { ConnectButton, useCurrentAccount, useSignAndExecuteTransaction, useSuiClient, useSuiClientQuery } from '@mysten/dapp-kit';
 import { Transaction } from '@mysten/sui/transactions';
+import { SUI_COIN_TYPE, USDC_COIN_TYPE, CETUS_COIN_TYPE, WUSDC_COIN_TYPE, getSwapQuote, buildSimpleSwapTx } from '@/utils/cetus';
+import Image from 'next/image';
+import { RefreshCcw, ArrowDownUp, Wallet, LogOut } from 'lucide-react';
+import { getGoogleLoginUrl, clearZkLoginSession } from '@/utils/zklogin';
 
-const GOOGLE_CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || 'YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com';
-const REDIRECT_URL = 'http://localhost:3000/auth/callback';
-// 🔴 TODO: Replace with your actual deployed package ID
-const SUIPAY_PACKAGE_ID = '0x123...456'; 
-const MERCHANT_CAP_ID = '0x...'; // You would typically get this from backend or local storage
+const TOKENS_LIST = [
+  { symbol: 'SUI', name: 'Sui', type: SUI_COIN_TYPE, decimals: 9, icon: '💧' },
+  { symbol: 'USDC', name: 'USD Coin', type: USDC_COIN_TYPE, decimals: 6, icon: '💵' },
+  { symbol: 'CETUS', name: 'Cetus Token', type: CETUS_COIN_TYPE, decimals: 9, icon: '🌊' },
+  { symbol: 'wUSDC', name: 'Wormhole USDC', type: WUSDC_COIN_TYPE, decimals: 6, icon: '🌉' },
+];
 
-export default function Home() {
+export default function SwapPage() {
   const account = useCurrentAccount();
-  const { mutateAsync: signMessage } = useSignPersonalMessage();
-  const { mutateAsync: signAndExecute } = useSignAndExecuteTransaction();
-  
-  const [token, setToken] = useState<string | null>(null);
-  const [summary, setSummary] = useState({ total_revenue: 0, order_count: 0, employee_count: 0 });
-  const [displayRevenue, setDisplayRevenue] = useState(0); // ✨ Animation state
-  const [isYieldActive, setIsYieldActive] = useState(false);
-  const [isZkLoading, setIsZkLoading] = useState(false);
-  const [isYieldProcessing, setIsYieldProcessing] = useState(false);
+  const suiClient = useSuiClient();
+  const { mutate: signAndExecuteTransaction } = useSignAndExecuteTransaction();
 
-  // 🛠️ Fetch real on-chain yield status
-  // 🔴 TODO: Replace with your actual Merchant Account Object ID after deployment
-  const MERCHANT_ACCOUNT_ID = "0x..."; 
-  
-  const { data: merchantAccount } = useSuiClientQuery('getObject', { 
-    id: MERCHANT_ACCOUNT_ID, 
-    options: { showContent: true } 
-  }, {
-    enabled: !!token && MERCHANT_ACCOUNT_ID !== "0x..." // Only fetch if logged in and ID is set
-  });
+  // zkLogin State
+  const [zkLoginAddress, setZkLoginAddress] = useState<string | null>(null);
 
   useEffect(() => {
-    if (merchantAccount?.data?.content?.dataType === 'moveObject') {
-       // Using unknown cast first for safety
-       const content = merchantAccount.data.content as { fields?: { auto_yield?: boolean } };
-       if (content.fields && 'auto_yield' in content.fields) {
-         setIsYieldActive(!!content.fields.auto_yield);
-       }
-    }
-  }, [merchantAccount]);
+    // Check for zkLogin session
+    const addr = window.sessionStorage.getItem('zklogin_address');
+    if (addr) setZkLoginAddress(addr);
+  }, []);
 
-  useEffect(() => {
-    // Sync display revenue with fetched summary
-    setDisplayRevenue(summary.total_revenue);
-  }, [summary.total_revenue]);
-
-  // ✨ Auto-Yield Animation
-  useEffect(() => {
-    if (!isYieldActive || displayRevenue <= 0) return;
-
-    // Simulate 12% APY roughly:
-    // Rate per second = 0.12 / 365 / 24 / 60 / 60 ≈ 3.8e-9
-    // For visual effect, we exaggerate it slightly or update frequently.
-    // Let's add 0.0001 USDC every 100ms if base > 0 to make it "tick"
-    
-    const interval = setInterval(() => {
-        setDisplayRevenue(prev => prev + 100); // Add 100 MIST (0.0001 USDC) per tick
-    }, 100);
-
-    return () => clearInterval(interval);
-  }, [isYieldActive, displayRevenue]);
-
-  useEffect(() => {
-    const stored = localStorage.getItem('suistream_token'); // Updated key
-    if (stored) {
-      setToken(stored);
-      fetchSummary(stored);
-    }
-  }, [account]);
-
-  const toggleYield = async () => {
-    if (!account) return;
-    setIsYieldProcessing(true);
-    
-    try {
-        const tx = new Transaction();
-        // 🔴 Replace with actual Object IDs from your deployment
-        const MERCHANT_ACCOUNT_ID = "0x..."; 
-        const MERCHANT_CAP_ID = "0x..."; 
-
-        tx.moveCall({
-            target: `${SUIPAY_PACKAGE_ID}::payment::set_auto_yield`,
-            arguments: [
-                tx.object(MERCHANT_ACCOUNT_ID),
-                tx.object(MERCHANT_CAP_ID),
-                tx.pure.bool(!isYieldActive)
-            ],
-            typeArguments: ['0x2::sui::SUI'] // Assuming SUI as Phantom T
-        });
-
-        await signAndExecute({ transaction: tx });
-        
-        // Optimistic update
-        setIsYieldActive(!isYieldActive);
-    } catch (e) {
-        console.error("Failed to toggle yield:", e);
-        // Fallback for demo if contract interaction fails (e.g. invalid IDs)
-        alert("Contract call failed (check console). Toggling UI state for demo.");
-        setIsYieldActive(!isYieldActive);
-    } finally {
-        setIsYieldProcessing(false);
-    }
+  const handleGoogleLogin = () => {
+    // Current Epoch is roughly needed for nonce, we can fetch it or just use a safe future one.
+    // For MVP, we'll fetch current epoch from network.
+    suiClient.getLatestSuiSystemState().then(state => {
+        const epoch = Number(state.epoch);
+        window.location.href = getGoogleLoginUrl(epoch);
+    });
   };
 
-  const fetchSummary = async (jwt: string) => {
-    try {
-      // Use explicit port 3002 if env var is missing (backend logs show port 3002)
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3002';
-      const res = await fetch(`${apiUrl}/merchant/summary`, {
-        headers: { 'Authorization': `Bearer ${jwt}` }
-      });
-      
-      if (res.status === 401) {
-        localStorage.removeItem('suistream_token'); // Updated key
-        setToken(null);
+  const handleLogout = () => {
+    clearZkLoginSession();
+    setZkLoginAddress(null);
+  };
+
+  const currentAddress = account?.address || zkLoginAddress;
+
+  const [fromToken, setFromToken] = useState(TOKENS_LIST[0]); // Default SUI
+  const [toToken, setToToken] = useState(TOKENS_LIST[1]);   // Default USDC
+  const [amountIn, setAmountIn] = useState('');
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const [quote, setQuote] = useState<any>(null);
+  const [loading, setLoading] = useState(false);
+  const [swapStatus, setSwapStatus] = useState<'idle' | 'swapping' | 'success' | 'error'>('idle');
+  const [errorMessage, setErrorMessage] = useState('');
+
+  // 💰 Fetch Balance
+  const { data: balanceData, refetch: refetchBalance } = useSuiClientQuery(
+    'getBalance',
+    {
+      owner: currentAddress || '',
+      coinType: fromToken.type,
+    },
+    {
+      enabled: !!currentAddress,
+      refetchInterval: 10000,
+    }
+  );
+
+  const balance = balanceData 
+    ? (parseInt(balanceData.totalBalance) / Math.pow(10, fromToken.decimals))
+    : 0;
+
+  const formattedBalance = balanceData ? balance.toFixed(4) : '---';
+
+  // Debounce Quote Fetching
+  useEffect(() => {
+    const fetchQuote = async () => {
+      if (!amountIn || parseFloat(amountIn) <= 0) {
+        setQuote(null);
         return;
       }
 
-      if (res.ok) {
-        const data = await res.json();
-        setSummary(data);
+      setLoading(true);
+      try {
+        console.log("Fetching quote for:", amountIn, fromToken.symbol, "->", toToken.symbol);
+        const rawAmount = Math.floor(parseFloat(amountIn) * Math.pow(10, fromToken.decimals));
+        const routes = await getSwapQuote(fromToken.type, toToken.type, rawAmount);
+        console.log("Quote received:", routes);
+        setQuote(routes);
+      } catch (err) {
+        console.error("Quote Error:", err);
+        setQuote(null);
+      } finally {
+        setLoading(false);
       }
-    } catch (e) { console.error(e); }
-  };
+    };
 
-  const handleLogin = async () => {
-    if (!account) return;
+    const timer = setTimeout(fetchQuote, 500);
+    return () => clearTimeout(timer);
+  }, [amountIn, fromToken, toToken]);
+
+  const handleSwap = async () => {
+    if (!currentAddress || !quote) return;
+
+    setSwapStatus('swapping');
+    setErrorMessage('');
+
     try {
-      const message = new TextEncoder().encode(`Login to SuiStream at ${Date.now()}`); // Updated message
-      const { signature } = await signMessage({ message });
-      const messageB64 = btoa(String.fromCharCode(...message));
+      const tx = new Transaction();
+      
+      // We need to get the Coin object for the input amount.
+      // For simplicity in this MVP, we assume the user has one coin with enough balance or we merge them.
+      // In a real app, we should select coins intelligently.
+      // Here, we'll try to split the gas coin (if SUI) or find a coin object.
+      
+      let inputCoin;
+      const amountInRaw = BigInt(Math.floor(parseFloat(amountIn) * Math.pow(10, fromToken.decimals)));
 
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3002'; // Consistent Port
-      const res = await fetch(`${apiUrl}/auth/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ address: account.address, signature: signature, message: messageB64 }),
-      });
-      const data = await res.json();
-      setToken(data.token);
-      localStorage.setItem('suistream_token', data.token); // Updated key
-      fetchSummary(data.token);
-    } catch (e) { alert('Auth failed'); }
-  };
+      if (fromToken.symbol === 'SUI') {
+        inputCoin = tx.splitCoins(tx.gas, [tx.pure.u64(amountInRaw)]);
+      } else {
+        // Fetch coins for other tokens
+        const { data: coins } = await suiClient.getCoins({
+           owner: currentAddress,
+           coinType: fromToken.type
+        });
+        
+        if (coins.length === 0) throw new Error(`No ${fromToken.symbol} balance found.`);
+        
+        // Simple strategy: take the first coin that has enough balance, or merge (not implemented for simplicity)
+        // ideally we merge coins here.
+        // For Hackathon MVP: Just pick the first one with enough balance or fail.
+        const validCoin = coins.find(c => BigInt(c.balance) >= amountInRaw);
+        if (validCoin) {
+             // Split it to exact amount
+             const primaryCoin = tx.object(validCoin.coinObjectId);
+             inputCoin = tx.splitCoins(primaryCoin, [tx.pure.u64(amountInRaw)]);
+        } else {
+             // If no single coin is enough, we need to merge. 
+             // Implementing merge logic is complex for MVP 1-file.
+             // We'll throw specific error.
+             throw new Error(`Insufficient single-coin balance for ${fromToken.symbol}. Please merge coins.`);
+        }
+      }
 
-  // 🚀 zkLogin 进阶版：支持临时密钥
-  const handleZkLogin = async (provider: 'google' | 'apple') => {
-    setIsZkLoading(true);
-    
-    // 1. 生成临时密钥对
-    const { Ed25519Keypair } = await import('@mysten/sui/keypairs/ed25519');
-    const ephemeralKeypair = new Ed25519Keypair();
-    // 修复：直接使用 getSecretKey() 获取私钥，避免 export() 可能返回 undefined 的问题
-    sessionStorage.setItem('zklogin_ephemeral_priv', ephemeralKeypair.getSecretKey());
+      await buildSimpleSwapTx(tx, quote, inputCoin, currentAddress, toToken.type);
 
-    // 2. 生成参数
-    const randomness = generateRandomness();
-    const maxEpoch = 2000; 
-    const nonce = generateNonce(ephemeralKeypair.getPublicKey(), maxEpoch, randomness);
+      if (account) {
+          // 🟢 Wallet Adapter Mode
+          signAndExecuteTransaction(
+            { transaction: tx },
+            {
+              onSuccess: (result) => {
+                console.log('Swap Success:', result);
+                setSwapStatus('success');
+                setAmountIn('');
+                setQuote(null);
+                refetchBalance(); // Refresh balance after swap
+              },
+              onError: (error) => {
+                console.error('Swap Failed:', error);
+                setSwapStatus('error');
+                setErrorMessage(error.message);
+              },
+            }
+          );
+      } else if (zkLoginAddress) {
+          // 🔵 zkLogin Mode (Not fully implemented signing in this demo)
+          setErrorMessage("zkLogin Signing is pending integration with Proving Service. Please use Sui Wallet for now.");
+          setSwapStatus('error');
+      }
 
-    localStorage.setItem('zklogin_randomness', randomness);
-    localStorage.setItem('zklogin_max_epoch', maxEpoch.toString());
-
-    // 3. 跳转授权
-    let loginUrl = '';
-    if (provider === 'google') {
-      const params = new URLSearchParams({
-        client_id: GOOGLE_CLIENT_ID,
-        redirect_uri: REDIRECT_URL,
-        response_type: 'id_token',
-        scope: 'openid email',
-        nonce: nonce,
-      });
-      loginUrl = `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
-    } else {
-      // Apple 登录逻辑占位
-      alert('Apple login will redirect to appleid.apple.com');
-      return;
+    } catch (e: unknown) {
+      console.error(e);
+      setSwapStatus('error');
+      setErrorMessage(e instanceof Error ? e.message : String(e));
     }
-    
-    window.location.href = loginUrl;
   };
+
+  const outputAmount = quote 
+    ? (Number(quote.amountOut) / Math.pow(10, toToken.decimals)).toFixed(4) 
+    : '---';
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900">
-      <header className="sticky top-0 z-50 w-full border-b bg-white/80 backdrop-blur-md">
-        <div className="container mx-auto flex h-16 items-center justify-between px-4">
-          <div className="flex items-center gap-2">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-600 text-white shadow-lg">
-              <CreditCard size={24} />
+    <div className="min-h-screen bg-gray-50 flex flex-col items-center justify-center p-4">
+      <div className="max-w-md w-full bg-white rounded-2xl shadow-xl overflow-hidden">
+        {/* Header */}
+        <div className="bg-gradient-to-r from-blue-600 to-indigo-600 p-6 text-white flex justify-between items-center">
+          <div>
+            <div className="flex items-center gap-2">
+              <RefreshCcw className="h-6 w-6 animate-spin-slow" />
+              <h1 className="text-2xl font-bold">Cetus Swap</h1>
             </div>
-            <span className="text-xl font-bold tracking-tight text-slate-800">SuiStream</span>
+            <p className="text-sm opacity-80 mt-1">Best Price Aggregator</p>
           </div>
-          <ConnectButton />
+          
+          {/* Wallet / zkLogin */}
+          <div className="flex gap-2">
+            {currentAddress && (
+               <div className="flex gap-2 items-center">
+                  {zkLoginAddress ? (
+                      <div className="flex items-center gap-2 bg-white/10 px-3 py-1.5 rounded-lg border border-white/20">
+                          <Image src="https://upload.wikimedia.org/wikipedia/commons/c/c1/Google_%22G%22_logo.svg" alt="G" width={16} height={16} />
+                          <span className="text-sm font-mono">{zkLoginAddress.slice(0, 4)}...{zkLoginAddress.slice(-4)}</span>
+                          <button onClick={handleLogout} className="ml-2 hover:text-red-300"><LogOut size={14}/></button>
+                      </div>
+                  ) : (
+                      <ConnectButton />
+                  )}
+               </div>
+            )}
+          </div>
         </div>
-      </header>
 
-      <main className="container mx-auto px-4 py-8">
-        {!token ? (
-           <div className="flex flex-col items-center justify-center py-20">
-              <div className="p-10 bg-white rounded-[2.5rem] shadow-xl text-center max-w-md w-full border border-slate-100">
-                <div className="w-20 h-20 bg-blue-50 text-blue-600 rounded-3xl flex items-center justify-center mx-auto mb-8">
-                  <LogIn size={40} />
-                </div>
-                <h2 className="text-3xl font-bold mb-3">Welcome to SuiStream</h2>
-                <p className="text-slate-500 mb-10 text-lg font-medium">Stream Money. Earn Yield.</p>
-                
-                <div className="space-y-4">
-                  <button onClick={handleLogin} className="w-full py-4 bg-slate-900 text-white rounded-2xl font-bold hover:bg-black transition-all flex items-center justify-center gap-3">
-                    <Wallet size={20} /> Connect & Sign In
-                  </button>
-                  
-                  <div className="relative my-8">
-                    <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-slate-100"></div></div>
-                    <div className="relative flex justify-center text-xs uppercase tracking-widest text-slate-400 font-bold"><span className="px-4 bg-white">Zero Barrier</span></div>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-4">
-                    <button onClick={() => handleZkLogin('google')} className="py-4 bg-white border border-slate-200 rounded-2xl font-bold hover:border-blue-400 transition-all flex items-center justify-center gap-2 text-sm">
-                      <Chrome size={18} className="text-blue-500" /> Google
-                    </button>
-                    <button onClick={() => handleZkLogin('apple')} className="py-4 bg-white border border-slate-200 rounded-2xl font-bold hover:border-slate-900 transition-all flex items-center justify-center gap-2 text-sm">
-                      <Apple size={18} /> Apple
-                    </button>
-                  </div>
-                </div>
-              </div>
-           </div>
-        ) : (
-          <div className="space-y-8 animate-in fade-in duration-700">
-            <div className="flex items-center justify-between">
-              <div>
-                <h2 className="text-3xl font-bold">Merchant Dashboard</h2>
-                <p className="text-slate-500 text-sm">Real-time settlement & payroll analytics.</p>
-              </div>
-              <Link href="/invoice/create" className="px-6 py-2 bg-blue-600 text-white rounded-xl font-bold shadow-lg hover:scale-105 transition-transform">
-                + New Invoice
-              </Link>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-              <div className="p-6 bg-white rounded-3xl shadow-sm border border-slate-100">
-                <p className="text-slate-500 text-sm font-medium">Total Revenue</p>
-                <div className="flex items-end gap-2">
-                    <p className="text-3xl font-black mt-1 tabular-nums tracking-tight">
-                        ${(displayRevenue / 1_000_000).toFixed(6)}
-                    </p>
-                    {isYieldActive && <span className="text-xs text-green-500 font-bold mb-2 animate-pulse">+Yielding</span>}
-                </div>
-                <div className="mt-4 flex items-center text-xs text-green-600 font-bold bg-green-50 w-fit px-2 py-1 rounded-lg">
-                  <TrendingUp size={14} className="mr-1" /> LIVE
-                </div>
-              </div>
-              <div className="p-6 bg-white rounded-3xl shadow-sm border border-slate-100">
-                <p className="text-slate-500 text-sm font-medium">Paid Orders</p>
-                <p className="text-3xl font-black mt-1">{summary.order_count}</p>
-                <p className="text-xs text-slate-400 mt-4 font-medium italic">Confirmed by Indexer</p>
-              </div>
-              <div className="p-6 bg-white rounded-3xl shadow-sm border border-slate-100">
-                <p className="text-slate-500 text-sm font-medium">Active Employees</p>
-                <p className="text-3xl font-black mt-1">{summary.employee_count}</p>
-                <p className="text-xs text-slate-400 mt-4 font-medium italic">Managed via Sui Pay</p>
+        {/* Swap Card */}
+        <div className="p-6 space-y-6">
+          
+          {/* From Token */}
+          <div className="bg-gray-50 p-4 rounded-xl border border-gray-100 focus-within:ring-2 focus-within:ring-blue-100 transition-all">
+            <div className="flex justify-between mb-2">
+              <span className="text-sm font-medium text-gray-500">You Pay</span>
+              <div className="text-sm text-gray-500 flex gap-2 items-center">
+                 <Wallet className="w-3 h-3" />
+                 <span>{formattedBalance}</span>
+                 {account && (
+                   <button 
+                     onClick={() => setAmountIn((balance - 0.01 > 0 ? balance - 0.01 : 0).toString())} 
+                     className="text-blue-600 font-bold hover:text-blue-700 text-xs bg-blue-50 px-2 py-0.5 rounded ml-1 transition-colors"
+                   >
+                     MAX
+                   </button>
+                 )}
               </div>
             </div>
-
-            <div className={`p-8 rounded-[2rem] border-2 transition-all duration-500 flex flex-col md:flex-row items-center justify-between gap-6 ${isYieldActive ? 'bg-gradient-to-r from-blue-600 to-blue-700 border-blue-400 text-white shadow-2xl shadow-blue-200' : 'bg-white border-slate-100 text-slate-800 shadow-sm'}`}>
-              <div className="flex items-center gap-6">
-                <div className={`h-16 w-16 rounded-2xl flex items-center justify-center transition-colors ${isYieldActive ? 'bg-white/20' : 'bg-blue-50 text-blue-600'}`}>
-                  <TrendingUp size={32} />
-                </div>
-                <div>
-                  <h3 className="text-2xl font-bold mb-1">StableLayer Auto-Yield</h3>
-                  <p className={isYieldActive ? 'text-blue-100' : 'text-slate-500'}>
-                    Earn up to 12% APY on idle USDC while waiting for settlement.
-                  </p>
+            <div className="flex gap-3 items-center">
+              <input 
+                type="number" 
+                placeholder="0.0" 
+                value={amountIn}
+                onChange={(e) => setAmountIn(e.target.value)}
+                className="bg-transparent text-3xl font-bold text-gray-800 w-full outline-none placeholder-gray-300"
+              />
+              <div className="relative">
+                <select 
+                  value={fromToken.symbol}
+                  onChange={(e) => setFromToken(TOKENS_LIST.find(t => t.symbol === e.target.value) || TOKENS_LIST[0])}
+                  className="appearance-none bg-white pl-3 pr-8 py-2 rounded-xl font-bold shadow-sm border border-gray-200 cursor-pointer hover:border-blue-300 transition-colors focus:outline-none focus:border-blue-500"
+                >
+                  {TOKENS_LIST.map(t => <option key={t.symbol} value={t.symbol}>{t.icon} {t.symbol}</option>)}
+                </select>
+                <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2 text-gray-500">
+                  <svg className="fill-current h-4 w-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path d="M9.293 12.95l.707.707L15.657 8l-1.414-1.414L10 10.828 5.757 6.586 4.343 8z"/></svg>
                 </div>
               </div>
-              <button onClick={toggleYield} disabled={isYieldProcessing} className={`flex items-center gap-3 px-8 py-4 rounded-2xl font-black transition-all shadow-lg ${isYieldActive ? 'bg-white text-blue-600 hover:bg-slate-50' : 'bg-slate-900 text-white hover:bg-black'}`}>
-                {isYieldProcessing ? <Loader2 className="animate-spin" size={20} /> : <Power size={20} />}
-                {isYieldActive ? 'Yielding Active' : 'Enable Yield'}
-              </button>
             </div>
-
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-              <Link href="/invoice/create" className="group p-10 bg-white rounded-[2.5rem] border border-slate-100 shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all">
-                <div className="h-14 w-14 bg-slate-50 rounded-2xl flex items-center justify-center mb-6 group-hover:bg-blue-600 group-hover:text-white transition-colors">
-                  <CreditCard size={28} />
-                </div>
-                <h3 className="text-2xl font-bold mb-2">Merchant Terminal</h3>
-                <p className="text-slate-500">Generate professional payment links and QR codes.</p>
-              </Link>
-              <Link href="/payroll" className="group p-8 bg-white border border-slate-100 rounded-3xl shadow-sm hover:shadow-xl hover:shadow-slate-200/50 hover:scale-[1.02] transition-all cursor-pointer">
-                <div className="flex items-start justify-between mb-10">
-                  <div className="p-4 bg-purple-50 text-purple-600 rounded-2xl">
-                    <Users size={32} />
-                  </div>
-                  <ArrowUpRight size={24} className="text-slate-300 group-hover:text-purple-600 transition-colors" />
-                </div>
-                <h3 className="text-2xl font-bold text-slate-800 mb-2">Run Payroll</h3>
-                <p className="text-slate-500">Mass payouts via Sui PTB. <span className="text-purple-600 font-bold text-xs bg-purple-50 px-2 py-1 rounded-full">New</span></p>
-              </Link>
-            </div>
-            
-            {/* Treasury Banner */}
-            <div className="mt-8">
-                <Link href="/treasury" className="group relative block overflow-hidden rounded-3xl bg-slate-900 p-8 text-white shadow-xl hover:scale-[1.01] transition-all">
-                    <div className="absolute top-0 right-0 -mt-10 -mr-10 h-64 w-64 rounded-full bg-blue-600/30 blur-3xl"></div>
-                    <div className="relative z-10 flex items-center justify-between">
-                        <div>
-                            <div className="inline-flex items-center gap-2 rounded-full bg-white/10 px-3 py-1 text-xs font-bold text-blue-300 mb-3 border border-white/20">
-                                <Sparkles size={14} />
-                                AI Treasury Agent
-                            </div>
-                            <h3 className="text-2xl font-bold mb-2">Optimize Your Idle Capital</h3>
-                            <p className="text-slate-400 max-w-lg">
-                                Your treasury is running at <strong>82% efficiency</strong>. 
-                                Click to auto-rebalance via Cetus & StableLayer.
-                            </p>
-                        </div>
-                        <div className="h-14 w-14 bg-white/10 rounded-full flex items-center justify-center group-hover:bg-blue-600 transition-colors">
-                            <ArrowUpRight size={28} />
-                        </div>
-                    </div>
-                </Link>
-            </div>
-
           </div>
-        )}
-      </main>
+
+          {/* Swap Icon */}
+          <div className="flex justify-center -my-5 relative z-10">
+             <button 
+               className="bg-white p-2 rounded-full shadow-lg border border-gray-100 cursor-pointer hover:bg-gray-50 hover:scale-110 transition-transform duration-200 group"
+               onClick={() => {
+                 const temp = fromToken;
+                 setFromToken(toToken);
+                 setToToken(temp);
+               }}
+             >
+                <ArrowDownUp className="h-5 w-5 text-blue-500 group-hover:rotate-180 transition-transform duration-300" />
+             </button>
+          </div>
+
+          {/* To Token */}
+          <div className="bg-gray-50 p-4 rounded-xl border border-gray-100">
+            <div className="flex justify-between mb-2">
+              <span className="text-sm font-medium text-gray-500">You Receive</span>
+              {quote && <span className="text-xs text-green-600 font-medium bg-green-50 px-2 py-0.5 rounded">Best Price</span>}
+            </div>
+            <div className="flex gap-3 items-center">
+              <div className={`text-3xl font-bold w-full ${loading ? 'text-gray-300' : 'text-gray-800'}`}>
+                {loading ? 'Searching...' : outputAmount}
+              </div>
+              <div className="relative">
+                <select 
+                  value={toToken.symbol}
+                  onChange={(e) => setToToken(TOKENS_LIST.find(t => t.symbol === e.target.value) || TOKENS_LIST[1])}
+                  className="appearance-none bg-white pl-3 pr-8 py-2 rounded-xl font-bold shadow-sm border border-gray-200 cursor-pointer hover:border-blue-300 transition-colors focus:outline-none focus:border-blue-500"
+                >
+                  {TOKENS_LIST.map(t => <option key={t.symbol} value={t.symbol}>{t.icon} {t.symbol}</option>)}
+                </select>
+                <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2 text-gray-500">
+                  <svg className="fill-current h-4 w-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path d="M9.293 12.95l.707.707L15.657 8l-1.414-1.414L10 10.828 5.757 6.586 4.343 8z"/></svg>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Route Info */}
+          {quote && (
+            <div className="bg-blue-50 p-3 rounded-lg border border-blue-100 text-sm text-blue-800">
+              <div className="flex justify-between items-center mb-1">
+                <span className="font-semibold">Best Route Found</span>
+                <span className="bg-blue-200 px-2 py-0.5 rounded text-xs text-blue-900">Aggregator</span>
+              </div>
+              <div className="flex items-center gap-2 text-xs opacity-80 flex-wrap">
+                 {/* Simple visualization of providers */}
+                 {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
+                 {quote.paths[0]?.steps?.map((step: any, idx: number) => (
+                    <span key={idx} className="flex items-center">
+                        {idx > 0 && <span className="mx-1">→</span>}
+                        <span>Pool via {quote.paths[0].label || 'Cetus'}</span>
+                    </span>
+                 ))}
+              </div>
+            </div>
+          )}
+
+          {/* Action Button */}
+          {currentAddress ? (
+             <button 
+                onClick={handleSwap}
+                disabled={!quote || loading || swapStatus === 'swapping'}
+                className={`w-full py-4 rounded-xl font-bold text-lg shadow-lg transition-all
+                  ${!quote || loading ? 'bg-gray-300 text-gray-500 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700 text-white shadow-blue-500/30'}
+                `}
+             >
+                {swapStatus === 'swapping' ? 'Swapping...' : 'Swap Now'}
+             </button>
+          ) : (
+             <div className="w-full flex gap-3">
+               <button onClick={handleGoogleLogin} className="flex-1 py-4 rounded-xl font-bold text-lg bg-white border-2 border-gray-200 hover:bg-gray-50 text-gray-700 flex justify-center items-center gap-2 transition-all">
+                  <Image src="https://upload.wikimedia.org/wikipedia/commons/c/c1/Google_%22G%22_logo.svg" alt="G" width={24} height={24} />
+                  Google Login
+               </button>
+               <div className="flex-1">
+                  <ConnectButton className="w-full !justify-center !py-4 !rounded-xl !text-lg !font-bold" />
+               </div>
+             </div>
+          )}
+          
+          {/* Status Messages */}
+          {swapStatus === 'success' && (
+              <div className="p-3 bg-green-100 text-green-700 rounded-lg text-center text-sm">
+                  Swap Successful! Check your wallet.
+              </div>
+          )}
+          {swapStatus === 'error' && (
+              <div className="p-3 bg-red-100 text-red-700 rounded-lg text-center text-sm break-all">
+                  Error: {errorMessage}
+              </div>
+          )}
+
+        </div>
+      </div>
+      
+      {/* Footer */}
+      <div className="mt-8 text-center text-gray-400 text-sm">
+        <p>Powered by Cetus Aggregator SDK on Sui Testnet</p>
+      </div>
     </div>
   );
 }

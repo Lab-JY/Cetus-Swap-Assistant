@@ -14,8 +14,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "SuiPay - Stablecoin Payment Gateway",
-  description: "Cross-border payments and payroll powered by Sui & StableLayer",
+  title: "Cetus Swap - Best Price Aggregator",
+  description: "Swap tokens on Sui with the best rates using Cetus Aggregator SDK.",
 };
 
 export default function RootLayout({
