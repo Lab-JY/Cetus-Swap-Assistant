@@ -16,16 +16,16 @@ export const MAX_EPOCH_KEY = 'zklogin_max_epoch';
 
 interface ZkProof {
   proofPoints: {
-    piA: string[];
-    piB: string[][];
-    piC: string[];
+    a: string[];
+    b: string[][];
+    c: string[];
   };
   issBase64Details: {
-    iss: string;
-    iss_base64url: string;
+    value: string;
+    indexMod4: number;
   };
   headerBase64: string;
-  addressSeed?: string;
+  addressSeed: string;
 }
 
 export function setupEphemeralKey() {
