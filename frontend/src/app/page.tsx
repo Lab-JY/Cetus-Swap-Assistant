@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { ConnectButton, useCurrentAccount, useSignAndExecuteTransaction, useSuiClient, useSuiClientQuery } from '@mysten/dapp-kit';
 import { Transaction } from '@mysten/sui/transactions';
-import { SUI_COIN_TYPE, USDC_COIN_TYPE, CETUS_COIN_TYPE, WUSDC_COIN_TYPE, getSwapQuote, buildSimpleSwapTx, SUI_NETWORK, recordSwapEvent } from '@/utils/cetus';
+import { SUI_COIN_TYPE, USDC_COIN_TYPE, CETUS_COIN_TYPE, WUSDC_COIN_TYPE, getSwapQuote, buildSimpleSwapTx, SUI_NETWORK, saveSwapToHistory } from '@/utils/cetus';
 import Image from 'next/image';
 import { RefreshCcw, ArrowDownUp, Wallet, LogOut, Copy, CheckCircle2, XCircle } from 'lucide-react';
 import { getGoogleLoginUrl, clearZkLoginSession, signTransactionWithZkLogin } from '@/utils/zklogin';
@@ -225,14 +225,15 @@ export default function SwapPage() {
                 setSwapStatus('confirming');
                 setLastTxDigest(result.digest);
 
-                // Record swap event on-chain
-                recordSwapEvent(
-                  suiClient,
+                // Save swap to history
+                saveSwapToHistory(
+                  currentAddress,
                   fromToken.type,
                   toToken.type,
                   (Number(amountIn) * Math.pow(10, fromToken.decimals)).toString(),
-                  quote?.amountOut?.toString() || '0'
-                ).catch(err => console.error('Failed to record swap event:', err));
+                  quote?.amountOut?.toString() || '0',
+                  result.digest
+                );
 
                 // Wait for transaction confirmation
                 setTimeout(() => {
@@ -308,14 +309,15 @@ export default function SwapPage() {
             setSwapStatus('confirming');
             setLastTxDigest(response.digest);
 
-            // Record swap event on-chain
-            recordSwapEvent(
-              suiClient,
+            // Save swap to history
+            saveSwapToHistory(
+              zkLoginAddress,
               fromToken.type,
               toToken.type,
               (Number(amountIn) * Math.pow(10, fromToken.decimals)).toString(),
-              quote?.amountOut?.toString() || '0'
-            ).catch(err => console.error('Failed to record swap event:', err));
+              quote?.amountOut?.toString() || '0',
+              response.digest
+            );
 
             // Wait for transaction confirmation
             setTimeout(() => {
@@ -736,7 +738,6 @@ export default function SwapPage() {
       {currentAddress && (
         <SwapHistory
           userAddress={currentAddress}
-          suiClient={suiClient}
           refreshTrigger={historyRefreshTrigger}
         />
       )}

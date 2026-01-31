@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { ExternalLink, RefreshCw, ChevronRight, ChevronLeft } from 'lucide-react';
-import { getSwapHistory, getTokenSymbol, SUI_NETWORK } from '@/utils/cetus';
+import { getTokenSymbol, SUI_NETWORK } from '@/utils/cetus';
 
 interface SwapRecord {
   user: string;
@@ -16,12 +16,10 @@ interface SwapRecord {
 
 interface SwapHistoryProps {
   userAddress: string | null;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  suiClient: any;
   refreshTrigger?: number;
 }
 
-export default function SwapHistory({ userAddress, suiClient, refreshTrigger }: SwapHistoryProps) {
+export default function SwapHistory({ userAddress, refreshTrigger }: SwapHistoryProps) {
   const [history, setHistory] = useState<SwapRecord[]>([]);
   const [loading, setLoading] = useState(false);
   const [isOpen, setIsOpen] = useState(false);
@@ -31,18 +29,28 @@ export default function SwapHistory({ userAddress, suiClient, refreshTrigger }: 
     : 'https://suiscan.xyz/testnet';
 
   const fetchHistory = useCallback(async () => {
-    if (!userAddress || !suiClient) return;
+    if (!userAddress) return;
 
     setLoading(true);
     try {
-      const swaps = await getSwapHistory(suiClient, userAddress, '', 10);
-      setHistory(swaps);
+      // Get swap history from localStorage
+      const storageKey = `swap_history_${userAddress}`;
+      const stored = window.localStorage.getItem(storageKey);
+      const swaps = stored ? JSON.parse(stored) : [];
+
+      // Sort by timestamp (most recent first) and limit to 10
+      const sorted = swaps
+        .sort((a: SwapRecord, b: SwapRecord) => b.timestamp - a.timestamp)
+        .slice(0, 10);
+
+      setHistory(sorted);
+      console.log(`📊 Loaded ${sorted.length} swaps from localStorage`);
     } catch (error) {
       console.error('Error fetching swap history:', error);
     } finally {
       setLoading(false);
     }
-  }, [userAddress, suiClient]);
+  }, [userAddress]);
 
   useEffect(() => {
     fetchHistory();
@@ -92,24 +100,24 @@ export default function SwapHistory({ userAddress, suiClient, refreshTrigger }: 
 
       {/* Drawer Panel */}
       <div
-        className={`fixed right-0 top-0 h-screen w-80 bg-white shadow-2xl z-40 transform transition-transform duration-300 ease-in-out ${
+        className={`fixed right-0 top-0 h-screen w-96 bg-gradient-to-b from-slate-50 to-slate-100 shadow-2xl z-40 transform transition-transform duration-300 ease-in-out ${
           isOpen ? 'translate-x-0' : 'translate-x-full'
         }`}
       >
         {/* Header */}
-        <div className="p-4 border-b border-gray-200 flex items-center justify-between sticky top-0 bg-white">
-          <h2 className="text-lg font-semibold text-gray-900">Swap History</h2>
+        <div className="p-6 border-b border-slate-200 flex items-center justify-between sticky top-0 bg-white/80 backdrop-blur-sm">
+          <h2 className="text-2xl font-bold bg-gradient-to-r from-blue-600 to-blue-800 bg-clip-text text-transparent">Swap History</h2>
           <div className="flex gap-2">
             <button
               onClick={fetchHistory}
               disabled={loading}
-              className="p-2 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-50"
+              className="p-2 hover:bg-slate-100 rounded-lg transition-colors disabled:opacity-50"
             >
               <RefreshCw size={18} className={loading ? 'animate-spin' : ''} />
             </button>
             <button
               onClick={() => setIsOpen(false)}
-              className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+              className="p-2 hover:bg-slate-100 rounded-lg transition-colors"
             >
               <ChevronRight size={18} />
             </button>
@@ -117,51 +125,62 @@ export default function SwapHistory({ userAddress, suiClient, refreshTrigger }: 
         </div>
 
         {/* History List */}
-        <div className="overflow-y-auto h-[calc(100vh-70px)]">
+        <div className="overflow-y-auto h-[calc(100vh-80px)] p-4 space-y-3">
           {history.length === 0 ? (
-            <div className="p-4 text-center text-gray-500 text-sm">
+            <div className="p-8 text-center text-slate-400 text-sm font-medium">
               {loading ? 'Loading...' : 'No swap history yet'}
             </div>
           ) : (
-            <div className="divide-y divide-gray-200">
+            <>
               {history.map((swap, idx) => (
-                <div key={idx} className="p-4 hover:bg-gray-50 transition-colors">
-                  {/* Swap Pair */}
-                  <div className="flex items-center justify-between mb-2">
+                <div
+                  key={idx}
+                  className="bg-white rounded-xl shadow-md hover:shadow-lg transition-all duration-200 p-4 border border-slate-100"
+                >
+                  {/* Swap Pair Header */}
+                  <div className="flex items-center justify-between mb-3">
                     <div className="flex items-center gap-2">
-                      <span className="text-sm font-medium text-gray-900">
-                        {getTokenSymbol(swap.fromCoin)} → {getTokenSymbol(swap.toCoin)}
-                      </span>
+                      <div className="bg-gradient-to-r from-blue-50 to-blue-100 rounded-lg px-3 py-1.5">
+                        <span className="text-sm font-bold text-blue-900">
+                          {getTokenSymbol(swap.fromCoin)} → {getTokenSymbol(swap.toCoin)}
+                        </span>
+                      </div>
                     </div>
                     <a
-                      href={`${explorerUrl}/txblock/${swap.txDigest}`}
+                      href={`${explorerUrl}/tx/${swap.txDigest}`}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="text-blue-500 hover:text-blue-700"
+                      className="text-blue-500 hover:text-blue-700 hover:bg-blue-50 p-1 rounded transition-colors"
+                      title="View on Suiscan"
                     >
-                      <ExternalLink size={14} />
+                      <ExternalLink size={16} />
                     </a>
                   </div>
 
                   {/* Amounts */}
-                  <div className="text-xs text-gray-600 space-y-1 mb-2">
-                    <div className="flex justify-between">
-                      <span>In:</span>
-                      <span>{formatAmount(swap.amountIn, 9)}</span>
+                  <div className="space-y-2.5 mb-3 bg-gradient-to-br from-slate-50 to-slate-100 rounded-lg p-3">
+                    <div className="flex justify-between items-center">
+                      <span className="text-xs font-semibold text-slate-600 uppercase tracking-wide">Amount In</span>
+                      <span className="text-sm font-bold text-slate-900 font-mono">
+                        {formatAmount(swap.amountIn, 9)}
+                      </span>
                     </div>
-                    <div className="flex justify-between">
-                      <span>Out:</span>
-                      <span>{formatAmount(swap.amountOut, 6)}</span>
+                    <div className="h-px bg-gradient-to-r from-slate-200 to-transparent"></div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-xs font-semibold text-slate-600 uppercase tracking-wide">Amount Out</span>
+                      <span className="text-sm font-bold text-green-600 font-mono">
+                        {formatAmount(swap.amountOut, 6)}
+                      </span>
                     </div>
                   </div>
 
                   {/* Time */}
-                  <div className="text-xs text-gray-400">
+                  <div className="text-xs text-slate-500 text-right font-medium">
                     {formatTime(swap.timestamp)}
                   </div>
                 </div>
               ))}
-            </div>
+            </>
           )}
         </div>
       </div>

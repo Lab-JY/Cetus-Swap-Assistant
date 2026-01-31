@@ -321,33 +321,34 @@ export function getTokenSymbol(coinType: string): string {
     return 'UNKNOWN';
 }
 
-// 📝 Record swap event on-chain
-export async function recordSwapEvent(
-    suiClient: any,
+// 📝 Save swap record to localStorage
+export function saveSwapToHistory(
+    userAddress: string,
     fromCoin: string,
     toCoin: string,
     amountIn: string,
-    amountOut: string
-): Promise<string> {
+    amountOut: string,
+    txDigest: string
+): void {
     try {
-        console.log('📝 Recording swap event on-chain...');
+        const storageKey = `swap_history_${userAddress}`;
+        const stored = window.localStorage.getItem(storageKey);
+        const swaps = stored ? JSON.parse(stored) : [];
 
-        const tx = new Transaction();
+        const newSwap = {
+            user: userAddress,
+            fromCoin,
+            toCoin,
+            amountIn,
+            amountOut,
+            timestamp: Math.floor(Date.now() / 1000),
+            txDigest,
+        };
 
-        // Call record_swap_event function
-        tx.moveCall({
-            target: `${CETUS_SWAP_PACKAGE_ID}::swap_helper::record_swap_event`,
-            arguments: [
-                tx.pure.string(fromCoin),
-                tx.pure.string(toCoin),
-                tx.pure.u64(amountIn),
-                tx.pure.u64(amountOut),
-            ],
-        });
-
-        return tx.serialize();
+        swaps.push(newSwap);
+        window.localStorage.setItem(storageKey, JSON.stringify(swaps));
+        console.log('✅ Swap saved to localStorage');
     } catch (error) {
-        console.error('❌ Error recording swap event:', error);
-        throw error;
+        console.error('❌ Error saving swap to localStorage:', error);
     }
 }
