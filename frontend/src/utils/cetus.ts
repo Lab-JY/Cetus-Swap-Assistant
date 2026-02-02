@@ -206,12 +206,15 @@ export async function buildSimpleSwapTx(
     quote: any,
     inputCoin: any,
     userAddress: string,
+    fromCoinType: string,
     toCoinType: string,
     slippage: number = 0.05
 ): Promise<Transaction> {
     if (!quote) throw new Error("Invalid Quote Object");
 
     console.log(`🏗️ Building Swap Transaction via ${quote.source === 'aggregator' ? 'Aggregator' : 'CLMM'}...`);
+    
+    let finalTx: Transaction;
 
     if (quote.source === 'aggregator') {
         if (!tx) throw new Error("Transaction object required for Aggregator mode");
@@ -224,7 +227,7 @@ export async function buildSimpleSwapTx(
             inputCoin: inputCoin,
             slippage: slippage,
         });
-        return tx;
+        finalTx = tx;
     } else {
         // CLMM Direct Swap - creates its own transaction
         const pool = await cetusClmm.Pool.getPool(quote.poolAddress);
@@ -232,7 +235,7 @@ export async function buildSimpleSwapTx(
         const amountLimit = adjustForSlippage(toAmount, slippage, !quote.a2b);
 
         // createSwapTransactionPayload creates a NEW transaction
-        const newTx = await cetusClmm.Swap.createSwapTransactionPayload({
+        finalTx = await cetusClmm.Swap.createSwapTransactionPayload({
             pool_id: pool.poolAddress,
             a2b: quote.a2b,
             by_amount_in: quote.rawSwapResult.byAmountIn,
@@ -241,8 +244,33 @@ export async function buildSimpleSwapTx(
             coinTypeA: pool.coinTypeA,
             coinTypeB: pool.coinTypeB,
         });
-        return newTx;
     }
+
+    // 🔗 Append On-Chain Analytics Event
+    try {
+        console.log("📝 Appending SwapEvent to transaction...");
+        
+        // Extract amountIn/amountOut from quote
+        // Handle BN or string or number
+        const amountIn = quote.rawSwapResult.amount ? quote.rawSwapResult.amount.toString() : (quote.source === 'aggregator' ? quote.router.amountIn.toString() : '0');
+        const amountOut = quote.amountOut ? quote.amountOut.toString() : (quote.source === 'aggregator' ? quote.router.amountOut.toString() : '0');
+
+        finalTx.moveCall({
+            target: `${CETUS_SWAP_PACKAGE_ID}::swap_helper::record_swap_event`,
+            arguments: [
+                finalTx.pure.string(fromCoinType),
+                finalTx.pure.string(toCoinType),
+                finalTx.pure.u64(amountIn),
+                finalTx.pure.u64(amountOut)
+            ]
+        });
+        console.log("✅ SwapEvent appended successfully");
+    } catch (e) {
+        console.error("❌ Failed to append SwapEvent:", e);
+        // Don't fail the swap if analytics fails
+    }
+
+    return finalTx;
 }
 
 function adjustForSlippage(amount: BN, slippage: number, isMax: boolean): BN {
@@ -285,21 +313,25 @@ export async function getSwapHistory(
                 return parsedJson && parsedJson.user === userAddress;
             })
             .sort((a: any, b: any) => {
-                const aTime = Number((a.parsedJson as any).timestamp || 0);
-                const bTime = Number((b.parsedJson as any).timestamp || 0);
+                // Use system timestampMs if available, fallback to contract timestamp
+                const aTime = Number(a.timestampMs || (a.parsedJson as any).timestamp || 0);
+                const bTime = Number(b.timestampMs || (b.parsedJson as any).timestamp || 0);
                 return bTime - aTime; // Most recent first
             })
             .slice(0, limit);
 
         return userEvents.map((event: any) => {
             const data = event.parsedJson as any;
+            // Use system timestampMs (milliseconds) instead of contract timestamp (epoch)
+            const timestamp = event.timestampMs ? Number(event.timestampMs) : Number(data.timestamp);
+            
             return {
                 user: data.user,
                 fromCoin: data.from_coin,
                 toCoin: data.to_coin,
                 amountIn: data.amount_in,
                 amountOut: data.amount_out,
-                timestamp: Number(data.timestamp),
+                timestamp: timestamp,
                 txDigest: event.id?.txDigest || ''
             };
         });
@@ -319,36 +351,4 @@ export function getTokenSymbol(coinType: string): string {
     if (coinType.includes('::idol_apple')) return 'IDOL_APPLE';
     if (coinType.includes('::idol_dgran')) return 'IDOL_DGRAN';
     return 'UNKNOWN';
-}
-
-// 📝 Save swap record to localStorage
-export function saveSwapToHistory(
-    userAddress: string,
-    fromCoin: string,
-    toCoin: string,
-    amountIn: string,
-    amountOut: string,
-    txDigest: string
-): void {
-    try {
-        const storageKey = `swap_history_${userAddress}`;
-        const stored = window.localStorage.getItem(storageKey);
-        const swaps = stored ? JSON.parse(stored) : [];
-
-        const newSwap = {
-            user: userAddress,
-            fromCoin,
-            toCoin,
-            amountIn,
-            amountOut,
-            timestamp: Math.floor(Date.now() / 1000),
-            txDigest,
-        };
-
-        swaps.push(newSwap);
-        window.localStorage.setItem(storageKey, JSON.stringify(swaps));
-        console.log('✅ Swap saved to localStorage');
-    } catch (error) {
-        console.error('❌ Error saving swap to localStorage:', error);
-    }
 }

@@ -3,7 +3,7 @@
 // Centralized constants to avoid duplication and ensure consistency across the app.
 
 // 🟢 Smart Contract Deployment Details
-export const CETUS_SWAP_PACKAGE_ID = process.env.NEXT_PUBLIC_CETUS_SWAP_PACKAGE_ID || '0x0';
+export const CETUS_SWAP_PACKAGE_ID = process.env.NEXT_PUBLIC_CETUS_SWAP_PACKAGE_ID || '0x39ef07af8dd8da1ecf5a6156807250c0d36ddeeed77cdd6147cf2a3e8873b6f9';
 
 // 🌐 Network Configuration
 // Default to Mainnet unless NEXT_PUBLIC_SUI_NETWORK is set to 'testnet'

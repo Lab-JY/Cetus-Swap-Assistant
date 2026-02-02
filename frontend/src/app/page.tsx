@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { ConnectButton, useCurrentAccount, useSignAndExecuteTransaction, useSuiClient, useSuiClientQuery } from '@mysten/dapp-kit';
 import { Transaction } from '@mysten/sui/transactions';
-import { SUI_COIN_TYPE, USDC_COIN_TYPE, CETUS_COIN_TYPE, WUSDC_COIN_TYPE, getSwapQuote, buildSimpleSwapTx, SUI_NETWORK, saveSwapToHistory } from '@/utils/cetus';
+import { SUI_COIN_TYPE, USDC_COIN_TYPE, CETUS_COIN_TYPE, WUSDC_COIN_TYPE, getSwapQuote, buildSimpleSwapTx, SUI_NETWORK } from '@/utils/cetus';
 import Image from 'next/image';
 import { RefreshCcw, ArrowDownUp, Wallet, LogOut, Copy, CheckCircle2, XCircle } from 'lucide-react';
 import { getGoogleLoginUrl, clearZkLoginSession, signTransactionWithZkLogin } from '@/utils/zklogin';
@@ -206,7 +206,7 @@ export default function SwapPage() {
       }
 
       // Pass full quote to buildSimpleSwapTx (selectedRouteId is only for UI display)
-      const finalTx = await buildSimpleSwapTx(tx, quote, inputCoin, currentAddress, toToken.type);
+      const finalTx = await buildSimpleSwapTx(tx, quote, inputCoin, currentAddress, fromToken.type, toToken.type);
 
       // Ensure gas budget is set if needed (especially for SUI swaps)
       if (fromToken.symbol === 'SUI') {
@@ -224,16 +224,6 @@ export default function SwapPage() {
                 setTxWaitMessage('Confirming transaction on blockchain...');
                 setSwapStatus('confirming');
                 setLastTxDigest(result.digest);
-
-                // Save swap to history
-                saveSwapToHistory(
-                  currentAddress,
-                  fromToken.type,
-                  toToken.type,
-                  (Number(amountIn) * Math.pow(10, fromToken.decimals)).toString(),
-                  quote?.amountOut?.toString() || '0',
-                  result.digest
-                );
 
                 // Wait for transaction confirmation
                 setTimeout(() => {
@@ -308,16 +298,6 @@ export default function SwapPage() {
             setTxWaitMessage('Confirming transaction on blockchain...');
             setSwapStatus('confirming');
             setLastTxDigest(response.digest);
-
-            // Save swap to history
-            saveSwapToHistory(
-              zkLoginAddress,
-              fromToken.type,
-              toToken.type,
-              (Number(amountIn) * Math.pow(10, fromToken.decimals)).toString(),
-              quote?.amountOut?.toString() || '0',
-              response.digest
-            );
 
             // Wait for transaction confirmation
             setTimeout(() => {

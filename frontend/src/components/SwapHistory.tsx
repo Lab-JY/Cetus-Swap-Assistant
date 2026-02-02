@@ -2,7 +2,8 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { ExternalLink, RefreshCw, ChevronRight, ChevronLeft } from 'lucide-react';
-import { getTokenSymbol, SUI_NETWORK } from '@/utils/cetus';
+import { getTokenSymbol, SUI_NETWORK, getSwapHistory } from '@/utils/cetus';
+import { useSuiClient } from '@mysten/dapp-kit';
 
 interface SwapRecord {
   user: string;
@@ -20,6 +21,7 @@ interface SwapHistoryProps {
 }
 
 export default function SwapHistory({ userAddress, refreshTrigger }: SwapHistoryProps) {
+  const suiClient = useSuiClient();
   const [history, setHistory] = useState<SwapRecord[]>([]);
   const [loading, setLoading] = useState(false);
   const [isOpen, setIsOpen] = useState(false);
@@ -33,31 +35,32 @@ export default function SwapHistory({ userAddress, refreshTrigger }: SwapHistory
 
     setLoading(true);
     try {
-      // Get swap history from localStorage
-      const storageKey = `swap_history_${userAddress}`;
-      const stored = window.localStorage.getItem(storageKey);
-      const swaps = stored ? JSON.parse(stored) : [];
-
-      // Sort by timestamp (most recent first) and limit to 10
-      const sorted = swaps
-        .sort((a: SwapRecord, b: SwapRecord) => b.timestamp - a.timestamp)
-        .slice(0, 10);
-
-      setHistory(sorted);
-      console.log(`📊 Loaded ${sorted.length} swaps from localStorage`);
+      // 1️⃣ Try to get data from Chain (Source of Truth)
+      const chainHistory = await getSwapHistory(suiClient, userAddress, '');
+      
+      setHistory(chainHistory);
+      console.log(`📊 Loaded ${chainHistory.length} swaps from Chain`);
     } catch (error) {
       console.error('Error fetching swap history:', error);
     } finally {
       setLoading(false);
     }
-  }, [userAddress]);
+  }, [userAddress, suiClient]);
 
   useEffect(() => {
     fetchHistory();
   }, [userAddress, refreshTrigger, fetchHistory]);
 
   const formatTime = (timestamp: number) => {
-    const date = new Date(timestamp * 1000);
+    // Determine if timestamp is in seconds (contract fallback) or milliseconds (system timestampMs)
+    // If it's less than 10^12, it's likely epoch/seconds. If it's > 10^12, it's ms.
+    // 2020-01-01 in ms is ~1.5e12
+    const isMilliseconds = timestamp > 1000000000000;
+    
+    // If it's the bugged "Epoch ID" (e.g. 100), this will show 1970. 
+    // But since we switched to timestampMs, we should get proper ms.
+    
+    const date = new Date(isMilliseconds ? timestamp : timestamp * 1000);
     return date.toLocaleTimeString('en-US', {
       month: 'short',
       day: 'numeric',
