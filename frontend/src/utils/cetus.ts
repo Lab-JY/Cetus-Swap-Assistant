@@ -316,6 +316,9 @@ export async function buildSimpleSwapTx(
 
     // 🔗 Append On-Chain Analytics Event
     try {
+        // Ensure sender is set for all transaction types (Crucial for DryRun)
+        finalTx.setSender(userAddress);
+
         console.log("📝 Appending SwapEvent to transaction...");
         
         // Extract amountIn/amountOut from quote
@@ -359,7 +362,8 @@ export async function getSwapHistory(
     limit: number = 20
 ) {
     try {
-        console.log(`📊 Fetching history for ${userAddress}...`);
+        const normalizedUserAddress = userAddress.toLowerCase();
+        console.log(`📊 Fetching history for ${normalizedUserAddress}...`);
 
         // 1. Fetch Swap Events
         const swapEventsPromise = suiClient.queryEvents({
@@ -374,6 +378,8 @@ export async function getSwapHistory(
         });
 
         const [swapEvents, transferEvents] = await Promise.all([swapEventsPromise, transferEventsPromise]);
+        
+        console.log(`🔍 Raw Events Found - Swap: ${swapEvents?.data?.length || 0}, Transfer: ${transferEvents?.data?.length || 0}`);
 
         let combinedEvents = [];
 
@@ -397,9 +403,14 @@ export async function getSwapHistory(
         const userEvents = combinedEvents
             .filter((event: any) => {
                 const data = event.parsedJson as any;
+                // Normalize addresses for comparison
+                const eventUser = data.user?.toLowerCase();
+                const eventSender = data.sender?.toLowerCase();
+                const eventRecipient = data.recipient?.toLowerCase();
+
                 // For swaps: user is 'user'. For transfers: user could be 'sender' or 'recipient'
-                if (event.type === 'swap') return data.user === userAddress;
-                if (event.type === 'transfer') return data.sender === userAddress || data.recipient === userAddress;
+                if (event.type === 'swap') return eventUser === normalizedUserAddress;
+                if (event.type === 'transfer') return eventSender === normalizedUserAddress || eventRecipient === normalizedUserAddress;
                 return false;
             })
             .sort((a: any, b: any) => {

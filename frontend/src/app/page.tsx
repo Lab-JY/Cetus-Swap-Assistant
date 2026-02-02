@@ -37,6 +37,10 @@ export default function SwapPage() {
   const [loginMethod, setLoginMethod] = useState<'wallet' | 'zklogin' | null>(null);
 
   useEffect(() => {
+    // 🔍 Debug Info on Init
+    console.log(`🚀 App Initialized on ${SUI_NETWORK.toUpperCase()}`);
+    console.log(`📦 Cetus Swap Package ID: ${process.env.NEXT_PUBLIC_CETUS_SWAP_PACKAGE_ID}`);
+
     // Check for zkLogin session
     const addr = window.sessionStorage.getItem('zklogin_address');
     if (addr) {
@@ -228,22 +232,32 @@ export default function SwapPage() {
         let tx: Transaction | null = null;
 
         if (mode === 'transfer') {
-             if (!recipientAddress || recipientAddress.length < 10) {
-                setGasEstimate('---');
-                return;
-             }
-             tx = new Transaction();
-             const amountRaw = BigInt(Math.floor(parseFloat(amountIn) * Math.pow(10, fromToken.decimals)));
-             tx.setSender(currentAddress);
-             
-             if (fromToken.symbol === 'SUI') {
-                  const [coin] = tx.splitCoins(tx.gas, [tx.pure.u64(amountRaw)]);
-                  tx.transferObjects([coin], tx.pure.address(recipientAddress));
-             } else {
-                  // For non-SUI transfer estimation, we skip complex logic for now
-                  // or we can reuse similar logic if we want accurate gas
-                  setGasEstimate('~0.005'); 
-                  return;
+             // ⚡ Zap Mode Check: If tokens are different, we estimate gas for the SWAP
+             if (fromToken.symbol !== toToken.symbol) {
+                 if (!quote) {
+                     setGasEstimate('---');
+                     return;
+                 }
+                 tx = await buildSwapTransaction();
+             } 
+             // 💸 Standard Transfer Check
+             else {
+                 if (!recipientAddress || recipientAddress.length < 10) {
+                    setGasEstimate('---');
+                    return;
+                 }
+                 tx = new Transaction();
+                 const amountRaw = BigInt(Math.floor(parseFloat(amountIn) * Math.pow(10, fromToken.decimals)));
+                 tx.setSender(currentAddress);
+                 
+                 if (fromToken.symbol === 'SUI') {
+                      const [coin] = tx.splitCoins(tx.gas, [tx.pure.u64(amountRaw)]);
+                      tx.transferObjects([coin], tx.pure.address(recipientAddress));
+                 } else {
+                      // For non-SUI transfer estimation, we skip complex logic for now
+                      setGasEstimate('~0.005'); 
+                      return;
+                 }
              }
         } else {
              // Swap Mode
@@ -264,11 +278,12 @@ export default function SwapPage() {
                 const totalGas = BigInt(gasUsed.computationCost) + BigInt(gasUsed.storageCost) - BigInt(gasUsed.storageRebate);
                 setGasEstimate((Number(totalGas) / 1e9).toFixed(4));
             } else {
+                console.error("❌ Gas Estimate DryRun Failed:", dryRunRes.effects.status);
                 setGasEstimate('Error');
             }
         }
       } catch (e) {
-        console.error("Gas Estimate Failed", e);
+        console.error("❌ Gas Estimate Exception:", e);
         setGasEstimate('---');
       }
     };
