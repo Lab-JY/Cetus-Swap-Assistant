@@ -47,12 +47,18 @@ This project implements a **Cetus Trading Terminal** with deep integration of th
 *   **Recording**: A Move call to `cetus_swap::swap_helper::record_swap_event` is appended to the transaction block.
 *   **Data**: Analytics are derived from on-chain events.
 
-### 3. Web2 Onboarding (zkLogin)
+### 3. ⚡ Zap Mode: Atomic PTB Composability
+"Zap Mode" demonstrates the power of **Sui Programmable Transaction Blocks (PTB)** by bundling complex operations into a single atomic transaction. Unlike traditional "Approve → Swap" flows, our architecture achieves:
+*   **Dynamic Input Management**: Automatically merges dust coins (`MergeCoins`) or splits exact amounts (`SplitCoins`) within the same block to prepare funds.
+*   **Embedded Protocol Logic**: Cetus Swap logic is executed as an embedded command sequence.
+*   **Atomic Verification**: A custom Move call (`record_swap_event`) is chained to the swap. The event is *only* emitted if the swap succeeds, ensuring 100% accurate on-chain analytics.
+
+### 4. Web2 Onboarding (zkLogin)
 *   **Authentication**: Users sign in with a **Google Account**.
 *   **Mechanism**: Uses **zkLogin** and the official Sui Proving Service to map Web2 identities to Web3 addresses.
 *   **Security**: Uses ephemeral, session-based signing keys.
 
-### 4. History Tracking
+### 5. History Tracking
 *   **Data Source**: The Swap History pulls data from Sui blockchain events.
 *   **Time Handling**: Supports different timestamp formats (Epoch vs. Milliseconds).
 
