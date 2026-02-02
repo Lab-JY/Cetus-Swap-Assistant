@@ -43,59 +43,55 @@ export async function getSwapQuote(
     }
 
     try {
-        // 1️⃣ Try Aggregator First (Only on Mainnet)
-        // The Aggregator SDK v1.4.3 currently throws "CetusRouter only supported on mainnet"
-        // when executing routerSwap on Testnet. So we skip it on Testnet.
-        if (SUI_NETWORK === 'mainnet') {
-            console.log("Trying Aggregator...");
-            const routerData = await aggregator.findRouters({
-                from: fromCoinType,
-                target: toCoinType,
-                amount: amount,
-                byAmountIn: byAmountIn,
+        // 1️⃣ Try Aggregator First (Mainnet & Testnet)
+        // Note: Testnet only supports limited providers (Cetus, DeepBook)
+        console.log(`Trying Aggregator on ${SUI_NETWORK}...`);
+        
+        const routerData = await aggregator.findRouters({
+            from: fromCoinType,
+            target: toCoinType,
+            amount: amount,
+            byAmountIn: byAmountIn,
+        });
+
+        if (routerData && routerData.paths && routerData.paths.length > 0) {
+            console.log("✅ Aggregator Routes Found:", {
+                totalPaths: routerData.paths.length,
+                bestAmountOut: routerData.amountOut.toString()
             });
 
-            if (routerData && routerData.paths && routerData.paths.length > 0) {
-                console.log("✅ Aggregator Routes Found:", {
-                    totalPaths: routerData.paths.length,
-                    bestAmountOut: routerData.amountOut.toString()
-                });
-
-                // RouterDataV3 returns paths as a flat array, we need to group them into routes
-                // For now, treat each path as a separate route option
-                const routes = routerData.paths.map((path: any, idx: number) => {
-                    return {
-                        id: idx,
-                        amountOut: new BN(path.amountOut),
-                        estimatedFee: 0,
-                        router: { path: [path] },
-                        source: 'aggregator',
-                        pathSteps: [{
-                            from: path.from,
-                            to: path.target,
-                            provider: path.provider,
-                            feeRate: path.feeRate,
-                            amountIn: path.amountIn,
-                            amountOut: path.amountOut
-                        }],
-                        hopCount: 1,
-                        rawSwapResult: { path: [path] }
-                    };
-                });
-
+            // RouterDataV3 returns paths as a flat array, we need to group them into routes
+            // For now, treat each path as a separate route option
+            const routes = routerData.paths.map((path: any, idx: number) => {
                 return {
-                    amountOut: routerData.amountOut,
+                    id: idx,
+                    amountOut: new BN(path.amountOut),
                     estimatedFee: 0,
-                    router: routerData,
+                    router: { path: [path] },
                     source: 'aggregator',
-                    routes: routes,
-                    selectedRouteId: 0, // Default to best route
-                    rawSwapResult: routerData,
-                    fullRouterData: routerData // Store full routerData for SDK
+                    pathSteps: [{
+                        from: path.from,
+                        to: path.target,
+                        provider: path.provider,
+                        feeRate: path.feeRate,
+                        amountIn: path.amountIn,
+                        amountOut: path.amountOut
+                    }],
+                    hopCount: 1,
+                    rawSwapResult: { path: [path] }
                 };
-            }
-        } else {
-            console.log("ℹ️ Skipping Aggregator on Testnet (Direct Pool Mode)");
+            });
+
+            return {
+                amountOut: routerData.amountOut,
+                estimatedFee: 0,
+                router: routerData,
+                source: 'aggregator',
+                routes: routes,
+                selectedRouteId: 0, // Default to best route
+                rawSwapResult: routerData,
+                fullRouterData: routerData // Store full routerData for SDK
+            };
         }
     } catch (error) {
         console.warn("⚠️ Aggregator failed, trying direct pool fallback...", error);

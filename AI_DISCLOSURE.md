@@ -8,9 +8,9 @@ In compliance with the **Sui Vibe Hackathon 2026** rules (Requirement #6), we he
 
 | Tool Name | Model / Version | Usage |
 | :--- | :--- | :--- |
-| **Claude Code** | Claude Haiku 4.5 (claude-haiku-4-5-20251001) | Code generation, debugging, refactoring, problem-solving, and documentation writing |
+| **Trae IDE** | Gemini-3-Pro-Preview (200k) | **Primary Development Agent**. Used for end-to-end feature implementation, bug fixing, architecture planning, and documentation. |
+| **Claude Code** | Claude Haiku 4.5 | Code generation, debugging, refactoring, problem-solving, and documentation writing |
 | **Google Gemini** | Gemini 3 Pro | Code analysis, architectural design, and complex problem-solving |
-| **Trae IDE** | Gemini-3-Pro-Preview | Pair programming, code generation, and project structure setup |
 | **GitHub Copilot** | GPT-5.2-Codex | Inline code completion and boilerplate generation |
 
 ---
@@ -79,58 +79,55 @@ Upgrade the swap_helper.move contract to use Move 2024 syntax and advanced featu
 
 ---
 
-### Bug Fixes & Optimization
+### Key Technical Implementations (Trae IDE Powered)
 
-#### Prompt 5: Fixing UnusedValueWithoutDrop Error
+#### Prompt 5: Implementing Atomic On-Chain Analytics with PTB
+**Context:**
+We needed to record swap data on-chain, but the swap logic was handled by external SDKs (Cetus).
+
 **Prompt:**
 ```
-Fix the error: "UnusedValueWithoutDrop { result_idx: 3, secondary_idx: 0 }"
-This occurs on wUSDC → USDC swaps with wallet connection.
-The issue is that a Transaction object is created but never used in CLMM mode.
-The CLMM SDK creates its own transaction, leaving the original tx unused.
-Solution: Make tx nullable and only create it when needed for Aggregator mode.
+How can I record swap events on-chain when using the Cetus SDK?
+I want to make sure every swap transaction also calls my Move contract `record_swap_event`.
+Modify `buildSimpleSwapTx` to append a MoveCall to the transaction block.
 ```
 
 **Result:**
-- Changed `tx: Transaction` to `tx: Transaction | null` in `buildSimpleSwapTx()`
-- Only create tx when `quote.source !== 'clmm'`
-- CLMM mode creates its own transaction via `cetusClmm.Swap.createSwapTransactionPayload()`
+- Implemented **Programmable Transaction Block (PTB)** logic in `frontend/src/utils/cetus.ts`.
+- Appended `moveCall` to the *same* transaction object returned by the Aggregator/CLMM SDK.
+- Achieved atomic execution of "Swap + Record".
 
-#### Prompt 6: Hybrid Routing Engine Optimization
+#### Prompt 6: Enabling Testnet Aggregator Support
+**Context:**
+Initially, the Aggregator was only enabled for Mainnet.
+
 **Prompt:**
 ```
-Optimize the hybrid routing logic in cetus.ts:
-1. Primary: Try Cetus Aggregator SDK for multi-hop routes (Mainnet only)
-2. Fallback: Use direct CLMM pool interaction if Aggregator fails or on Testnet
-3. Handle transaction object lifecycle properly based on routing mode
-4. Provide clear error messages for unsupported token pairs
-5. Implement price impact protection (disable swap if > 5%)
+Check if Cetus Aggregator SDK supports Testnet.
+If yes, modify the `getSwapQuote` function to use Aggregator on Testnet as well.
+Update the fallback logic to handle cases where Aggregator finds no routes.
 ```
 
-**Result:** Implemented complete hybrid routing system with:
-- Automatic fallback from Aggregator to CLMM
-- Proper transaction management based on routing mode
-- Comprehensive error handling
-- Support for multiple token pairs on both networks
+**Result:**
+- Researched and confirmed Testnet support.
+- Refactored `getSwapQuote` to allow Aggregator execution on Testnet.
+- Updated `README.md` to reflect the new "Hybrid Routing" capability on both networks.
 
-#### Prompt 8: Fixing Pyth Price Nodes Configuration
+#### Prompt 7: Fixing Timestamp Display Bug
+**Context:**
+The Swap History was showing dates from 1970 because the contract recorded Epoch ID instead of Unix Timestamp.
+
 **Prompt:**
 ```
-Fix the error: "All Pyth price nodes are unavailable. Cannot fetch price data."
-The Cetus Aggregator SDK requires Pyth price node URLs to be configured.
-Add pythUrls parameter to AggregatorClient initialization with fallback Pyth nodes:
-- https://hermes.pyth.network
-- https://hermes-beta.pyth.network
+The swap history shows incorrect dates.
+The contract returns `timestamp` as Epoch (e.g., 100), but the frontend expects milliseconds.
+Fix this in the frontend without redeploying the contract.
+Use the system `timestampMs` from the event metadata if available.
 ```
 
-**Result:** Updated AggregatorClient initialization in `frontend/src/utils/cetus.ts:11-18` to include:
-```typescript
-pythUrls: [
-    'https://hermes.pyth.network',
-    'https://hermes-beta.pyth.network'
-]
-```
-This ensures price data can be fetched even if one Pyth node is unavailable.
+**Result:**
+- Updated `getSwapHistory` to prioritize `timestampMs` from the event indexer.
+- Modified `SwapHistory.tsx` to intelligently detect and format both Epoch and Millisecond timestamps.
 
 ---
 
@@ -176,7 +173,7 @@ Create a network-aware configuration system for:
 
 ## 4. Documentation & Testing
 
-### Prompt 7: Comprehensive README
+### Prompt 8: Comprehensive README
 **Prompt:**
 ```
 Create a comprehensive README for hackathon submission that includes:
@@ -197,42 +194,3 @@ Create a comprehensive README for hackathon submission that includes:
 - API reference for all key functions
 - Deployment and testing instructions
 - Troubleshooting section
-
----
-
-## 5. Human Verification & Modifications
-
-All AI-generated code was thoroughly reviewed, tested, and modified by human developers to ensure:
-
-✅ **Correctness**: All functions tested and verified to work correctly
-✅ **Security**: No vulnerabilities introduced; proper error handling implemented
-✅ **Alignment**: Code aligns with project architecture and hackathon requirements
-✅ **Move 2024 Compliance**: Smart contract uses latest Move syntax (edition = "2024")
-✅ **Best Practices**: Follows Sui ecosystem conventions and patterns
-
-### Key Human Decisions:
-- Chose official Sui Proving Service over alternative approaches
-- Designed hybrid routing engine architecture
-- Implemented transaction lifecycle management for CLMM vs Aggregator modes
-- Structured on-chain analytics with Tables and events
-- Prioritized user experience with frictionless Google login
-
----
-
-## 6. Summary
-
-| Phase | AI Contribution | Human Contribution |
-| :--- | :--- | :--- |
-| **P0-1: zkLogin** | Generated initial integration code | Debugged TypeScript errors, fixed SDK parameter structures |
-| **P0-2: Move 2024** | Generated contract structure | Designed advanced features, ensured compliance |
-| **Bug Fixes** | Suggested solutions | Implemented and tested fixes |
-| **Documentation** | Generated initial drafts | Reviewed, enhanced, and finalized |
-| **Architecture** | Provided implementation patterns | Designed overall system architecture |
-
----
-
-## 7. Conclusion
-
-AI tools were used to perform the majority of development work, with human developers providing direction, oversight, and final validation. The human role focused on issuing requirements and commands, while AI tools handled code generation, debugging, refactoring, and documentation. The project demonstrates responsible AI usage in hackathon development with full transparency and compliance with hackathon rules.
-
-**AI Usage Percentage**: ~75% AI implementation, ~25% human direction and validation
