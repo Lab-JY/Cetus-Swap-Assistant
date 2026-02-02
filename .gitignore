@@ -19,3 +19,4 @@ contracts/*/build/
 contracts/**/build/
 *.mv
 *.mvsm
+.claude/

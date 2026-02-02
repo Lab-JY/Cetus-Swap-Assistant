@@ -62,6 +62,16 @@ public struct RegistryInitialized has copy, drop {
     timestamp: u64,
 }
 
+/// Event emitted when a transfer with memo occurs
+public struct TransferEvent has copy, drop {
+    sender: address,
+    recipient: address,
+    coin_type: ascii::String,
+    amount: u64,
+    memo: ascii::String,
+    timestamp: u64,
+}
+
 /// Initialize the swap registry (called once)
 public entry fun init_registry(ctx: &mut sui::tx_context::TxContext) {
     let admin_cap = AdminCap {
@@ -146,7 +156,7 @@ public entry fun execute_swap<T>(
         });
     };
 
-    // Emit swap event
+    // Emit swap event for analytics
     event::emit(SwapEvent {
         user: sender,
         from_coin: from_coin_type,
@@ -156,7 +166,36 @@ public entry fun execute_swap<T>(
         timestamp,
     });
 
-    // Transfer coin to recipient
+    // Transfer coin to recipient (or user)
+    // NOTE: In the context of Cetus Swap via PTB, the `coin` passed here is usually
+    // the output coin of the swap that we want to record.
+    // So we transfer it to the recipient.
+    transfer::public_transfer(coin, recipient);
+}
+
+/// Transfer coin with a memo attached
+public entry fun transfer_coin_with_memo<T>(
+    coin: Coin<T>,
+    recipient: address,
+    memo: ascii::String,
+    ctx: &mut sui::tx_context::TxContext
+) {
+    let sender = tx_context::sender(ctx);
+    let amount = coin.value();
+    let coin_type = type_name::get<T>().into_string();
+    let timestamp = tx_context::epoch(ctx);
+
+    // Emit event
+    event::emit(TransferEvent {
+        sender,
+        recipient,
+        coin_type,
+        amount,
+        memo,
+        timestamp,
+    });
+
+    // Perform transfer
     transfer::public_transfer(coin, recipient);
 }
 
@@ -173,12 +212,7 @@ public fun get_user_stats(
     }
 }
 
-/// Get total registry statistics
-public fun get_registry_stats(registry: &SwapRegistry): (u64, u64) {
-    (registry.total_swaps, registry.total_volume)
-}
-
-/// Record a swap event (called after swap is completed)
+/// Record a swap event (called via PTB composition)
 public entry fun record_swap_event(
     from_coin: ascii::String,
     to_coin: ascii::String,
@@ -186,34 +220,15 @@ public entry fun record_swap_event(
     amount_out: u64,
     ctx: &mut sui::tx_context::TxContext
 ) {
+    let sender = tx_context::sender(ctx);
+    let timestamp = tx_context::epoch(ctx);
+
     event::emit(SwapEvent {
-        user: tx_context::sender(ctx),
+        user: sender,
         from_coin,
         to_coin,
         amount_in,
         amount_out,
-        timestamp: tx_context::epoch(ctx),
+        timestamp,
     });
 }
-
-/// Legacy function for backward compatibility
-public entry fun transfer_with_event<T>(
-    coin: Coin<T>,
-    recipient: address,
-    ctx: &sui::tx_context::TxContext
-) {
-    let amount = coin.value();
-    let type_name = type_name::get<T>();
-
-    event::emit(SwapEvent {
-        user: tx_context::sender(ctx),
-        from_coin: type_name.into_string(),
-        to_coin: ascii::string(b"unknown"),
-        amount_in: amount,
-        amount_out: 0,
-        timestamp: tx_context::epoch(ctx),
-    });
-
-    transfer::public_transfer(coin, recipient);
-}
-

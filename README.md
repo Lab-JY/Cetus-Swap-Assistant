@@ -6,36 +6,91 @@
 [![Cetus](https://img.shields.io/badge/Powered_by-Cetus-orange?style=flat-square)](https://cetus.zone)
 [![License](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](LICENSE)
 
-**Swap Tokens. Best Price. Zero Friction.**
-
-A next-generation DEX interface built on Sui, participating in the **Sui Vibe Hackathon 2026**. This project demonstrates the power of **Programmable Transaction Blocks (PTBs)** and **zkLogin** to bridge the gap between Web2 usability and Web3 liquidity.
+A DEX interface built on Sui, participating in the **Sui Vibe Hackathon 2026**. This project utilizes **Programmable Transaction Blocks (PTBs)** and **zkLogin** to integrate Web2 authentication with Web3 liquidity.
 
 ---
 
-## 🌟 Key Innovations
+## 🏆 Sui Vibe Hackathon 2026
 
-### 1. 🧠 Intelligent Hybrid Routing Engine
-*   **Best Execution**: Automatically finds the best price using **Cetus Aggregator SDK** on both Mainnet and Testnet.
-*   **Robust Fallback**: Seamlessly switches to direct **Cetus CLMM SDK** interaction if the Aggregator is unavailable or finds no routes (e.g., low liquidity on Testnet).
-*   **Zero Downtime**: Ensures 100% success rate across network environments.
+This project is submitted for the **Sui Vibe Hackathon** (Jan 26 - Feb 12, 2026), targeting the **Cetus Track** and **Sui Tech Stack Track**.
 
-### 2. 🔗 Atomic On-Chain Analytics (PTB Powered)
-*   **Composability**: We don't just "read" data; we "write" it. Every swap transaction—whether routed via Aggregator or Direct Pool—is constructed as a **Programmable Transaction Block (PTB)**.
-*   **Atomic Recording**: A custom Move call to `cetus_swap::swap_helper::record_swap_event` is appended to the *same* transaction block as the swap.
-*   **True Data**: Analytics are not off-chain logs; they are on-chain events guaranteed by the Sui consensus.
+### ✅ Participation Requirements Checklist
 
-### 3. 🔐 Frictionless Web2 Onboarding (zkLogin)
-*   **No Seed Phrases**: Users sign in with their **Google Account**.
-*   **Non-Custodial**: Uses **zkLogin** and the official Sui Proving Service to map Web2 identities to Web3 addresses without private key management.
-*   **Ephemeral Keys**: secure, session-based signing keys.
+1.  **Project Start Time**: Codebase initialized on **Jan 27, 2026** (Verified via Commit History).
+2.  **Move Language**: Smart contracts (`contracts/cetus_swap`) are written in **Move 2024 Edition**.
+3.  **Official SDK**: Integrated with `@mysten/sui` (TypeScript SDK) and `@mysten/dapp-kit`.
+4.  **Runnable Product**: Live Web App provided (see demo link above).
+5.  **Open Source**: Source code available in this repository.
+6.  **AI Disclosure**: See [AI_USAGE_DISCLOSURE.md](./AI_USAGE_DISCLOSURE.md) for details on AI tools used.
 
-### 4. ⚡ Real-Time "Source of Truth" History
-*   **Chain-First Data**: The Swap History drawer pulls data directly from the Sui blockchain events, ensuring cross-device consistency.
-*   **Smart Time Resolution**: Automatically handles different timestamp formats (Epoch vs. Milliseconds) for accurate reporting.
+### 🎯 Track Alignment: Cetus Track
+> "Must empower Cetus or integrate the aggregator or SDK"
+
+This project implements a **Cetus Trading Terminal** with deep integration of the Cetus ecosystem:
+
+*   **Aggregator Integration**: Utilizes `@cetusprotocol/aggregator-sdk` to perform smart routing across liquidity sources on both Mainnet and Testnet.
+*   **Direct Pool Execution**: Implements `@cetusprotocol/cetus-sui-clmm-sdk` as a fallback mechanism for direct CLMM pool interaction.
+*   **Liquidity Utilization**: Facilitates token swaps and "Zap" (Convert & Send) operations entirely powered by Cetus liquidity pools.
+*   **On-Chain Data**: Generates verifiable on-chain volume and usage data for the Cetus protocol through custom event emission.
 
 ---
 
-## 🛠 Tech Stack
+## 🌟 Key Features
+
+### 1. Hybrid Routing Engine
+*   **Execution**: Uses **Cetus Aggregator SDK** to find trading paths.
+*   **Fallback**: Switches to **Cetus CLMM SDK** interaction if the Aggregator is unavailable.
+*   **Reliability**: Designed to function across different network environments.
+
+### 2. Atomic On-Chain Analytics (PTB Powered)
+*   **Structure**: Swap transactions are constructed as **Programmable Transaction Blocks (PTBs)**.
+*   **Recording**: A Move call to `cetus_swap::swap_helper::record_swap_event` is appended to the transaction block.
+*   **Data**: Analytics are derived from on-chain events.
+
+### 3. Web2 Onboarding (zkLogin)
+*   **Authentication**: Users sign in with a **Google Account**.
+*   **Mechanism**: Uses **zkLogin** and the official Sui Proving Service to map Web2 identities to Web3 addresses.
+*   **Security**: Uses ephemeral, session-based signing keys.
+
+### 4. History Tracking
+*   **Data Source**: The Swap History pulls data from Sui blockchain events.
+*   **Time Handling**: Supports different timestamp formats (Epoch vs. Milliseconds).
+
+---
+
+## ✨ Features Overview
+
+| Category | Capabilities |
+| :--- | :--- |
+| **Authentication** | ✅ **zkLogin (Google)** - No wallet needed<br>✅ **Wallet Adapter** - Standard wallet support<br>✅ **Session Management** - Secure ephemeral keys |
+| **Trading** | ✅ **Hybrid Routing** - Aggregator (Mainnet/Testnet) + CLMM Fallback<br>✅ **Real-Time Quotes** - Live price updates<br>✅ **Slippage Protection** - Auto-calculation & safety checks |
+| **Data & Analytics** | ✅ **On-Chain History** - Permanent, verifiable swap records<br>✅ **User Statistics** - Track total volume and swap counts (on-chain)<br>✅ **Explorer Integration** - Direct links to Suiscan |
+| **UX / UI** | ✅ **Auto Network Switch** - Mainnet/Testnet detection<br>✅ **Responsive Design** - Mobile-first interface<br>✅ **Instant Feedback** - Toast notifications & Confetti effects |
+
+---
+
+## 🛣️ Roadmap
+
+### Phase 1: Foundation (Current Status) ✅
+*   [x] **Core Swap Engine**: Hybrid routing (Aggregator + CLMM) with intelligent fallback.
+*   [x] **Web2 Onboarding**: Google zkLogin integration for frictionless entry.
+*   [x] **On-Chain Analytics**: Atomic `SwapEvent` recording via PTB composability.
+*   [x] **UX Polish**: Real-time quotes, slippage protection, and history tracking.
+
+### Phase 2: Enhanced Utility (Current Status) ✅
+*   [x] **Swap & Transfer**: Leverage the contract's `recipient` capability to allow swapping tokens and sending them directly to a third-party address (e.g., "Pay with SUI, Receive USDC").
+*   [x] **Gas Estimation**: Real-time Gas fee preview for Transfer operations.
+*   [ ] **Limit Orders**: Integrate Cetus Limit Order SDK for advanced trading strategies.
+*   [ ] **Multi-Wallet Support**: Add support for more wallet adapters (Sui Wallet, Nightly, etc.).
+
+### Phase 3: Ecosystem Expansion (Future Vision) 🔮
+*   [ ] **"Swap-as-a-Service" SDK**: Package the frontend logic into an embeddable React component for GameFi and SocialFi projects.
+*   [ ] **Credit Scoring System**: Build a user credit profile based on the on-chain swap history stored in `SwapRegistry`.
+*   [ ] **Social Trading**: Introduce a leaderboard and "Copy Trading" feature based on top performers in the registry.
+
+---
+
+## �� Tech Stack
 
 *   **Frontend**: Next.js 16 (App Router), React 19, Tailwind CSS 4
 *   **Sui Integration**:
@@ -46,7 +101,7 @@ A next-generation DEX interface built on Sui, participating in the **Sui Vibe Ha
     *   `@cetusprotocol/cetus-sui-clmm-sdk` (Direct Swap)
 *   **Smart Contracts**:
     *   Sui Move 2024 Edition
-    *   Deployed on Testnet: `0x39ef07af8dd8da1ecf5a6156807250c0d36ddeeed77cdd6147cf2a3e8873b6f9`
+    *   Deployed on Testnet: `0x855950a86c5b082c0d3d3a9bf99d2d24c52c088c1af9655508439ce083c1b3d3`
 
 ---
 
@@ -77,7 +132,7 @@ A next-generation DEX interface built on Sui, participating in the **Sui Vibe Ha
     NEXT_PUBLIC_SUI_NETWORK=testnet
     
     # Cetus Swap Contract Package ID (Must match the network)
-    NEXT_PUBLIC_CETUS_SWAP_PACKAGE_ID=0x39ef07af8dd8da1ecf5a6156807250c0d36ddeeed77cdd6147cf2a3e8873b6f9
+    NEXT_PUBLIC_CETUS_SWAP_PACKAGE_ID=0x855950a86c5b082c0d3d3a9bf99d2d24c52c088c1af9655508439ce083c1b3d3
     
     # Google Client ID for zkLogin (Get from Google Cloud Console)
     NEXT_PUBLIC_GOOGLE_CLIENT_ID=your_google_client_id
@@ -117,14 +172,20 @@ module cetus_swap::swap_helper {
 
 ---
 
-## 🏆 Hackathon Tracks
+## 🏆 Hackathon Track
 
-This project targets the **Cetus Track** and **Sui Tech Stack Track**:
-*   **Cetus Integration**: Deep integration of Aggregator and CLMM SDKs.
-*   **Sui Vibe**: Focus on UX (zkLogin) and Composability (PTB).
+**Primary Submission: Cetus Track**
+
+> "Must empower Cetus or integrate the aggregator or SDK"
+
+We have built a dedicated **Cetus Analytics & Trading Terminal** that fits this track perfectly:
+
+1.  **Deepest Integration**: We don't just use one SDK; we implement a **Hybrid Engine** combining `@cetusprotocol/aggregator-sdk` (Smart Routing) AND `@cetusprotocol/cetus-sui-clmm-sdk` (Direct Fallback).
+2.  **Empowering the Ecosystem**: We solve a critical data gap. By implementing **Atomic On-Chain Analytics** via PTB, we provide verifiable trading history and user volume stats for Cetus users—data that is currently hard to track on-chain.
+3.  **Sui Tech Showcase**: While focused on Cetus, we leverage the best of Sui (zkLogin, Move 2024, PTB) to deliver the ultimate trading experience.
 
 ---
 
 ## 📄 License
 
-MIT License. Built with ❤️ for the Sui Community.
+MIT License.
