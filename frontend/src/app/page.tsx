@@ -1,9 +1,13 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { ConnectButton, useCurrentAccount, useSignAndExecuteTransaction, useSuiClient, useSuiClientQuery } from '@mysten/dapp-kit';
 import { Transaction } from '@mysten/sui/transactions';
-import { SUI_COIN_TYPE, USDC_COIN_TYPE, CETUS_COIN_TYPE, WUSDC_COIN_TYPE, getSwapQuote, buildSimpleSwapTx, SUI_NETWORK, buildTransferTx } from '@/utils/cetus';
+import { isValidSuiAddress } from '@mysten/sui/utils';
+import { SUI_COIN_TYPE, USDC_COIN_TYPE, CETUS_COIN_TYPE, WUSDC_COIN_TYPE, getSwapQuote, buildSimpleSwapTx, SUI_NETWORK, buildTransferTx, selectAndPrepareCoins } from '@/utils/cetus';
+import { executeWithRetry } from '@/utils/retry';
+import { getFriendlyErrorMessage } from '@/utils/errors';
+import TransactionStepper from '@/components/TransactionStepper';
 import Image from 'next/image';
 import { RefreshCcw, ArrowDownUp, Wallet, LogOut, Copy, CheckCircle2, XCircle, Settings } from 'lucide-react';
 import { getGoogleLoginUrl, clearZkLoginSession, signTransactionWithZkLogin } from '@/utils/zklogin';
@@ -26,10 +30,22 @@ const TESTNET_TOKENS = [
 
 const TOKENS_LIST = SUI_NETWORK === 'testnet' ? TESTNET_TOKENS : MAINNET_TOKENS;
 
+import { secureStorage } from '@/utils/storage';
+
+// Helper to safely parse decimal string to BigInt
+const parseAmount = (amount: string, decimals: number): bigint => {
+  if (!amount) return BigInt(0);
+  // Remove any commas if present
+  const cleanAmount = amount.replace(/,/g, '');
+  const [integer, fraction = ''] = cleanAmount.split('.');
+  const paddedFraction = fraction.padEnd(decimals, '0').slice(0, decimals);
+  return BigInt(integer + paddedFraction);
+};
+
 export default function SwapPage() {
   const account = useCurrentAccount();
   const suiClient = useSuiClient();
-  const { mutate: signAndExecuteTransaction } = useSignAndExecuteTransaction();
+  const { mutateAsync: signAndExecuteTransaction } = useSignAndExecuteTransaction();
 
   // zkLogin State
   const [zkLoginAddress, setZkLoginAddress] = useState<string | null>(null);
@@ -38,11 +54,11 @@ export default function SwapPage() {
 
   useEffect(() => {
     // 🔍 Debug Info on Init
-    console.log(`🚀 App Initialized on ${SUI_NETWORK.toUpperCase()}`);
-    console.log(`📦 Cetus Swap Package ID: ${process.env.NEXT_PUBLIC_CETUS_SWAP_PACKAGE_ID}`);
+    // console.log(`🚀 App Initialized on ${SUI_NETWORK.toUpperCase()}`);
+    // console.log(`📦 Cetus Swap Package ID: ${process.env.NEXT_PUBLIC_CETUS_SWAP_PACKAGE_ID}`);
 
     // Check for zkLogin session
-    const addr = window.sessionStorage.getItem('zklogin_address');
+    const addr = secureStorage.getItem<string>('zklogin_address');
     if (addr) {
       setZkLoginAddress(addr);
       setLoginMethod('zklogin');
@@ -72,7 +88,11 @@ export default function SwapPage() {
   // Determine current address based on login method
   const currentAddress = loginMethod === 'wallet' ? walletAddress : loginMethod === 'zklogin' ? zkLoginAddress : null;
 
-  // Mode: Swap or Transfer
+  // 🛡️ Network Safety Check
+  const isWrongNetwork = 
+    account?.chains && 
+    ((SUI_NETWORK === 'mainnet' && !account.chains.includes('sui:mainnet')) ||
+     (SUI_NETWORK === 'testnet' && !account.chains.includes('sui:testnet')));
   const [mode, setMode] = useState<'swap' | 'transfer'>('swap');
   const [recipientAddress, setRecipientAddress] = useState('');
   const [memo, setMemo] = useState('');
@@ -93,6 +113,15 @@ export default function SwapPage() {
   const [historyRefreshTrigger, setHistoryRefreshTrigger] = useState(0);
   const [slippage, setSlippage] = useState(0.5); // Default 0.5%
   const [showSettings, setShowSettings] = useState(false);
+  const [successModalConfig, setSuccessModalConfig] = useState({ 
+      title: 'Swap Successful!', 
+      desc: 'Your transaction has been processed successfully on the Sui Network.',
+      btnText: 'Close'
+  });
+  
+  // 🛡️ Review Modal State
+  const [showReviewModal, setShowReviewModal] = useState(false);
+  const [pendingAction, setPendingAction] = useState<'swap' | 'transfer' | null>(null);
 
   // 💰 Fetch Balance
   const { data: balanceData, refetch: refetchBalance } = useSuiClientQuery(
@@ -113,9 +142,53 @@ export default function SwapPage() {
 
   const formattedBalance = balanceData ? balance.toFixed(4) : '---';
 
+  const handleMax = () => {
+    if (!balanceData || !balanceData.totalBalance) return;
+    
+    const decimals = fromToken.decimals;
+    const rawBalance = BigInt(balanceData.totalBalance);
+    let maxAmountRaw = rawBalance;
+
+    // If swapping SUI, reserve some for gas (0.05 SUI)
+    // 0.05 * 10^9 = 50,000,000
+    if (fromToken.symbol === 'SUI') {
+        const gasReserve = BigInt(50_000_000); 
+        if (maxAmountRaw > gasReserve) {
+            maxAmountRaw -= gasReserve;
+        } else {
+            maxAmountRaw = BigInt(0);
+        }
+    }
+
+    // Convert to string with decimal point manually to avoid float precision issues
+    const divisor = BigInt(10) ** BigInt(decimals);
+    const integerPart = maxAmountRaw / divisor;
+    const remainder = maxAmountRaw % divisor;
+    
+    let amountStr = integerPart.toString();
+    
+    if (remainder > 0) {
+        // Pad start with zeros to match decimal places
+        const remainderStr = remainder.toString().padStart(decimals, '0');
+        // Trim trailing zeros
+        const trimmedRemainder = remainderStr.replace(/0+$/, '');
+        amountStr += `.${trimmedRemainder}`;
+    }
+
+    setAmountIn(amountStr);
+  };
+
   // Debounce Quote Fetching
   useEffect(() => {
     const fetchQuote = async () => {
+      // 🛑 Pre-check: Don't fetch if tokens are the same
+      if (fromToken.symbol === toToken.symbol) {
+          setQuote(null);
+          setErrorMessage('');
+          setGasEstimate('---');
+          return;
+      }
+
       if (!amountIn || parseFloat(amountIn) <= 0) {
         setQuote(null);
         setErrorMessage('');
@@ -131,10 +204,10 @@ export default function SwapPage() {
       setLoading(true);
       setErrorMessage('');
       try {
-        console.log("Fetching quote for:", amountIn, fromToken.symbol, "->", toToken.symbol);
-        const rawAmount = Math.floor(parseFloat(amountIn) * Math.pow(10, fromToken.decimals));
+        // console.log("Fetching quote for:", amountIn, fromToken.symbol, "->", toToken.symbol);
+        const rawAmount = parseAmount(amountIn, fromToken.decimals).toString();
         const routes = await getSwapQuote(fromToken.type, toToken.type, rawAmount, currentAddress);
-        console.log("Quote received:", routes);
+        // console.log("Quote received:", routes);
 
         // Check if the response is an error
         if (routes && 'error' in routes && routes.error) {
@@ -157,68 +230,52 @@ export default function SwapPage() {
   }, [amountIn, fromToken, toToken, currentAddress]);
 
   // 🏗️ Build Swap Transaction Helper
-  const buildSwapTransaction = async () => {
+  const buildSwapTransaction = useCallback(async () => {
       if (!currentAddress || !quote) throw new Error("Missing params");
 
       let inputCoin;
       let tx: Transaction | null = null;
-      const amountInRaw = BigInt(Math.floor(parseFloat(amountIn) * Math.pow(10, fromToken.decimals)));
+      const amountInRaw = parseAmount(amountIn, fromToken.decimals);
 
       // ⚠️ CLMM SDK (Fallback) builds its own transaction with its own coin selection logic.
       // We only need to manually split coins if we are using the Aggregator (which appends to our tx).
-      if (quote.source !== 'clmm') {
+      // However, if we are in ZAP mode, we might need to manually construct the CLMM transaction 
+      // (as fallback manual router construction), so we should initialize tx anyway if isZap is true.
+      
+      const isZap = mode === 'transfer' && fromToken.symbol !== toToken.symbol;
+      const recipient = mode === 'transfer' ? recipientAddress : '';
+
+      if (quote.source !== 'clmm' || isZap) {
           tx = new Transaction();
-          if (fromToken.symbol === 'SUI') {
-            inputCoin = tx.splitCoins(tx.gas, [tx.pure.u64(amountInRaw)]);
-          } else {
-            // Fetch coins for other tokens
-            const { data: coins } = await suiClient.getCoins({
-              owner: currentAddress,
-              coinType: fromToken.type
-            });
-
-            if (coins.length === 0) throw new Error(`No ${fromToken.symbol} balance found.`);
-
-            // Sort coins by balance descending
-            const sortedCoins = coins.sort((a, b) => Number(BigInt(b.balance) - BigInt(a.balance)));
-
-            // Try to find a single coin with enough balance
-            const validCoin = sortedCoins.find(c => BigInt(c.balance) >= amountInRaw);
-            if (validCoin) {
-                const primaryCoin = tx.object(validCoin.coinObjectId);
-                inputCoin = tx.splitCoins(primaryCoin, [tx.pure.u64(amountInRaw)]);
-            } else {
-                // Merge multiple coins if needed
-                const coinsToMerge = [];
-                let totalBalance = BigInt(0);
-
-                for (const coin of sortedCoins) {
-                  coinsToMerge.push(tx.object(coin.coinObjectId));
-                  totalBalance += BigInt(coin.balance);
-                  if (totalBalance >= amountInRaw) break;
-                }
-
-                if (totalBalance < amountInRaw) {
-                  throw new Error(`Insufficient balance for ${fromToken.symbol}`);
-                }
-
-                if (coinsToMerge.length > 1) {
-                  tx.mergeCoins(coinsToMerge[0], coinsToMerge.slice(1));
-                }
-                inputCoin = tx.splitCoins(coinsToMerge[0], [tx.pure.u64(amountInRaw)]);
-            }
-          }
+          // Use extracted coin selection logic
+          inputCoin = await selectAndPrepareCoins(
+            suiClient, 
+            currentAddress, 
+            fromToken.type, 
+            amountInRaw, 
+            tx
+          );
       }
 
       // Use slippage state (convert % to decimal, e.g. 0.5 -> 0.005)
-      const finalTx = await buildSimpleSwapTx(tx, quote, inputCoin, currentAddress, fromToken.type, toToken.type, slippage / 100);
+      const finalTx = await buildSimpleSwapTx(
+          tx, 
+          quote, 
+          inputCoin, 
+          currentAddress, 
+          fromToken.type, 
+          toToken.type, 
+          slippage / 100,
+          isZap,
+          recipient
+      );
 
       if (fromToken.symbol === 'SUI') {
           finalTx.setGasBudget(100000000);
       }
       
       return finalTx;
-  };
+  }, [currentAddress, quote, amountIn, fromToken, mode, recipientAddress, suiClient, slippage, toToken.type, toToken.symbol]);
 
   // ⛽ Gas Estimation Hook
   useEffect(() => {
@@ -242,12 +299,12 @@ export default function SwapPage() {
              } 
              // 💸 Standard Transfer Check
              else {
-                 if (!recipientAddress || recipientAddress.length < 10) {
+                 if (!isValidSuiAddress(recipientAddress)) {
                     setGasEstimate('---');
                     return;
                  }
                  tx = new Transaction();
-                 const amountRaw = BigInt(Math.floor(parseFloat(amountIn) * Math.pow(10, fromToken.decimals)));
+                 const amountRaw = parseAmount(amountIn, fromToken.decimals);
                  tx.setSender(currentAddress);
                  
                  if (fromToken.symbol === 'SUI') {
@@ -278,19 +335,28 @@ export default function SwapPage() {
                 const totalGas = BigInt(gasUsed.computationCost) + BigInt(gasUsed.storageCost) - BigInt(gasUsed.storageRebate);
                 setGasEstimate((Number(totalGas) / 1e9).toFixed(4));
             } else {
-                console.error("❌ Gas Estimate DryRun Failed:", dryRunRes.effects.status);
-                setGasEstimate('Error');
+                const errorMsg = dryRunRes.effects.status.error || '';
+                if (errorMsg.includes("InsufficientCoinBalance") || errorMsg.includes("Balance")) {
+                   setGasEstimate("Low Bal.");
+                } else {
+                   console.error("❌ Gas Estimate DryRun Failed:", dryRunRes.effects.status);
+                   setGasEstimate('Error');
+                }
             }
         }
       } catch (e) {
-        console.error("❌ Gas Estimate Exception:", e);
-        setGasEstimate('---');
+        // console.error("❌ Gas Estimate Exception:", e);
+        if (String(e).includes("InsufficientCoinBalance") || String(e).includes("Balance")) {
+           setGasEstimate("Low Bal.");
+        } else {
+           setGasEstimate('---');
+        }
       }
     };
 
     const timer = setTimeout(estimateGas, 800);
     return () => clearTimeout(timer);
-  }, [mode, amountIn, recipientAddress, currentAddress, fromToken, suiClient, memo, quote, slippage]);
+  }, [mode, amountIn, recipientAddress, currentAddress, fromToken, suiClient, memo, quote, slippage, buildSwapTransaction, toToken.type, toToken.symbol]);
 
   const handleTransfer = async () => {
       if (!currentAddress) return;
@@ -305,58 +371,25 @@ export default function SwapPage() {
              return;
           }
           
-          setTxWaitMessage('Zap Mode: Converting tokens first...');
+          setTxWaitMessage('Zap Mode: Swapping and Sending atomically...');
           
-          // Execute Swap Logic
+          // Execute Atomic Zap Logic (via handleSwap which now supports Zap)
           await handleSwap();
-          
-          // Note: Since handleSwap is async but we don't control the callback here easily,
-          // The flow stops after Swap. The user will see "Swap Successful".
-          // Ideally, we should prompt them "Now click Send again to transfer".
-          // This is a "Partial Zap" for now.
           return;
       }
 
       try {
         const tx = new Transaction();
-        const amountRaw = BigInt(Math.floor(parseFloat(amountIn) * Math.pow(10, fromToken.decimals)));
-        let inputCoin;
-
-        if (fromToken.symbol === 'SUI') {
-            // SUI Transfer
-            [inputCoin] = tx.splitCoins(tx.gas, [tx.pure.u64(amountRaw)]);
-        } else {
-            // Other Coin Transfer
-             const { data: coins } = await suiClient.getCoins({
-                  owner: currentAddress,
-                  coinType: fromToken.type
-             });
-
-             if (coins.length === 0) throw new Error(`No ${fromToken.symbol} balance found.`);
-             
-             const sortedCoins = coins.sort((a, b) => Number(BigInt(b.balance) - BigInt(a.balance)));
-             const validCoin = sortedCoins.find(c => BigInt(c.balance) >= amountRaw);
-
-             if (validCoin) {
-                 const primaryCoin = tx.object(validCoin.coinObjectId);
-                 inputCoin = tx.splitCoins(primaryCoin, [tx.pure.u64(amountRaw)]);
-             } else {
-                 const coinsToMerge = [];
-                 let totalBalance = BigInt(0);
-                 for (const coin of sortedCoins) {
-                     coinsToMerge.push(tx.object(coin.coinObjectId));
-                     totalBalance += BigInt(coin.balance);
-                     if (totalBalance >= amountRaw) break;
-                 }
-                 if (totalBalance < amountRaw) throw new Error("Insufficient Balance");
-                 
-                 if (coinsToMerge.length > 1) {
-                     tx.mergeCoins(coinsToMerge[0], coinsToMerge.slice(1));
-                 }
-                 const primaryCoin = coinsToMerge[0];
-                 inputCoin = tx.splitCoins(primaryCoin, [tx.pure.u64(amountRaw)]);
-             }
-        }
+        const amountRaw = parseAmount(amountIn, fromToken.decimals);
+        
+        // Use extracted coin selection
+        const inputCoin = await selectAndPrepareCoins(
+             suiClient,
+             currentAddress,
+             fromToken.type,
+             amountRaw,
+             tx
+        );
 
         // Transfer Logic
         // tx.transferObjects([inputCoin], tx.pure.address(recipientAddress));
@@ -365,54 +398,77 @@ export default function SwapPage() {
 
         // Execute
         if (loginMethod === 'zklogin') {
-             // ... zkLogin logic ...
-             setTxWaitMessage('Generating ZK proof...');
-             const jwt = window.sessionStorage.getItem('zklogin_jwt');
-             if (!jwt) throw new Error('JWT not found');
-             
-             const { transactionBlockSerialized, signature } = await signTransactionWithZkLogin(tx, jwt);
-             const res = await suiClient.executeTransactionBlock({
-                 transactionBlock: transactionBlockSerialized,
-                 signature: signature,
-                 options: { showEffects: true, showEvents: true }
+             await executeWithRetry(async () => {
+                // ... zkLogin logic ...
+                setTxWaitMessage('Generating ZK proof...');
+                const jwt = secureStorage.getItem<string>('zklogin_jwt');
+                if (!jwt) throw new Error('JWT not found');
+                
+                const { transactionBlockSerialized, signature } = await signTransactionWithZkLogin(tx, jwt);
+                const res = await suiClient.executeTransactionBlock({
+                    transactionBlock: transactionBlockSerialized,
+                    signature: signature,
+                    options: { showEffects: true, showEvents: true }
+                });
+                
+                if (res.effects?.status.status === 'success') {
+                    setLastTxDigest(res.digest);
+                    setSwapStatus('success');
+                    setSuccessModalConfig({
+                        title: 'Transfer Successful!',
+                        desc: `Successfully sent ${fromToken.symbol} to recipient.`,
+                        btnText: 'Close'
+                    });
+                    setShowSuccessModal(true);
+                    triggerConfetti();
+                    refetchBalance();
+                    setHistoryRefreshTrigger(prev => prev + 1);
+                } else {
+                    throw new Error("Transfer Failed");
+                }
              });
-             
-             if (res.effects?.status.status === 'success') {
-                 setLastTxDigest(res.digest);
-                 setSwapStatus('success');
-                 setShowSuccessModal(true);
-                 confetti({ particleCount: 100, spread: 70, origin: { y: 0.6 } });
-                 refetchBalance();
-                 setHistoryRefreshTrigger(prev => prev + 1);
-             } else {
-                 throw new Error("Transfer Failed");
-             }
         } else {
             // Wallet Adapter
-            signAndExecuteTransaction(
-                { transaction: tx },
-                {
-                    onSuccess: (result) => {
-                        setLastTxDigest(result.digest);
-                        setSwapStatus('success');
-                        setShowSuccessModal(true);
-                        confetti({ particleCount: 100, spread: 70, origin: { y: 0.6 } });
-                        refetchBalance();
-                        setHistoryRefreshTrigger(prev => prev + 1);
-                    },
-                    onError: (err) => {
-                        setErrorMessage(err.message);
-                        setSwapStatus('error');
-                    }
-                }
-            );
+            await executeWithRetry(async () => {
+                const result = await signAndExecuteTransaction({ transaction: tx });
+                setLastTxDigest(result.digest);
+                setSwapStatus('success');
+                setSuccessModalConfig({
+                    title: 'Transfer Successful!',
+                    desc: `Successfully sent ${fromToken.symbol} to recipient.`,
+                    btnText: 'Close'
+                });
+                setShowSuccessModal(true);
+                triggerConfetti();
+                refetchBalance();
+                setHistoryRefreshTrigger(prev => prev + 1);
+            });
         }
 
       } catch (err) {
           console.error("Transfer Error:", err);
-          setErrorMessage(err instanceof Error ? err.message : "Transfer Failed");
+          const msg = err instanceof Error ? err.message : "Transfer Failed";
+          setErrorMessage(getFriendlyErrorMessage(msg));
           setSwapStatus('error');
       }
+  };
+
+  // 🛑 Intercept Actions with Review Modal
+  const initiateAction = (action: 'swap' | 'transfer') => {
+    if (!currentAddress || !amountIn) return;
+    if (action === 'transfer' && !recipientAddress) return;
+    
+    setPendingAction(action);
+    setShowReviewModal(true);
+  };
+
+  const handleConfirmAction = async () => {
+    setShowReviewModal(false);
+    if (pendingAction === 'swap') {
+        await handleSwap();
+    } else if (pendingAction === 'transfer') {
+        await handleTransfer();
+    }
   };
 
   const handleSwap = async () => {
@@ -427,66 +483,55 @@ export default function SwapPage() {
       if (account) {
           // 🟢 Wallet Adapter Mode
           setTxWaitMessage('Waiting for wallet confirmation...');
-          signAndExecuteTransaction(
-            { transaction: finalTx },
-            {
-              onSuccess: (result) => {
-                console.log('Swap Success:', result);
-                setTxWaitMessage('Confirming transaction on blockchain...');
-                setSwapStatus('confirming');
-                setLastTxDigest(result.digest);
+          
+          await executeWithRetry(async () => {
+              const result = await signAndExecuteTransaction({ transaction: finalTx });
+              
+              console.log('Swap Success:', result);
+              setTxWaitMessage('Confirming transaction on blockchain...');
+              setSwapStatus('confirming');
+              setLastTxDigest(result.digest);
 
-                // Wait for transaction confirmation
-                setTimeout(() => {
+              // Wait for transaction confirmation
+              setTimeout(() => {
                   setSwapStatus('success');
-                  setAmountIn('');
-                  setQuote(null);
+                  
+                  // Check for Zap Mode Success
+                  if (mode === 'transfer' && fromToken.symbol !== toToken.symbol) {
+                      setAmountIn('');
+                      setQuote(null);
+                      
+                      setSuccessModalConfig({
+                          title: 'Zap Transfer Successful!',
+                          desc: `Successfully swapped ${fromToken.symbol} and sent ${toToken.symbol} to recipient.`,
+                          btnText: 'Close'
+                      });
+                  } else {
+                      setAmountIn('');
+                      setQuote(null);
+                      setSuccessModalConfig({
+                          title: 'Swap Successful!',
+                          desc: 'Your transaction has been processed successfully.',
+                          btnText: 'Close'
+                      });
+                  }
+
                   setTxWaitMessage('');
                   refetchBalance(); // Refresh balance after swap
                   setHistoryRefreshTrigger(prev => prev + 1); // Trigger history refresh
                   setShowSuccessModal(true);
 
                   // 🎉 Confetti Effect
-                  const duration = 3000;
-                  const end = Date.now() + duration;
+                  triggerConfetti();
+              }, 2000);
+          });
 
-                  const frame = () => {
-                    confetti({
-                      particleCount: 5,
-                      angle: 60,
-                      spread: 55,
-                      origin: { x: 0 },
-                      colors: ['#3b82f6', '#10b981', '#6366f1']
-                    });
-                    confetti({
-                      particleCount: 5,
-                      angle: 120,
-                      spread: 55,
-                      origin: { x: 1 },
-                      colors: ['#3b82f6', '#10b981', '#6366f1']
-                    });
-
-                    if (Date.now() < end) {
-                      requestAnimationFrame(frame);
-                    }
-                  };
-                  frame();
-                }, 2000);
-              },
-              onError: (error) => {
-                console.error('Swap Failed:', error);
-                setSwapStatus('error');
-                setTxWaitMessage('');
-                setErrorMessage(error.message);
-              },
-            }
-          );
       } else if (zkLoginAddress) {
           // 🔵 zkLogin Mode - Sign with Proving Service
-          try {
+          await executeWithRetry(async () => {
             setTxWaitMessage('Generating ZK proof from Proving Service...');
 
-            const jwt = window.sessionStorage.getItem('zklogin_jwt');
+            const jwt = secureStorage.getItem<string>('zklogin_jwt');
             if (!jwt) {
               throw new Error('JWT not found in session');
             }
@@ -511,71 +556,147 @@ export default function SwapPage() {
             setLastTxDigest(response.digest);
 
             // Wait for transaction confirmation
-            setTimeout(() => {
+            setTimeout(async () => {
+              
+              // Check for CLMM Zap Mode (2-Step Process)
+              if (mode === 'transfer' && fromToken.symbol !== toToken.symbol && quote.source === 'clmm') {
+                  console.log("⚡ CLMM Zap: Initiating Step 2 (Transfer)...");
+                  setTxWaitMessage('Step 1 (Swap) Complete. Please sign Step 2 (Transfer)...');
+                  
+                  try {
+                      // Build Transfer Transaction
+                      const tx2 = new Transaction();
+                      const safeAmount = BigInt(quote.amountOut) * BigInt(990) / BigInt(1000); 
+                      
+                      const inputCoin2 = await selectAndPrepareCoins(
+                           suiClient,
+                           zkLoginAddress,
+                           toToken.type,
+                           safeAmount,
+                           tx2
+                      );
+                      
+                      await buildTransferTx(tx2, inputCoin2, recipientAddress, toToken.type, memo);
+                      
+                      // Execute Step 2
+                      const jwt = secureStorage.getItem<string>('zklogin_jwt');
+                      if (!jwt) throw new Error('JWT missing for step 2');
+                      
+                      const { transactionBlockSerialized, signature } = await signTransactionWithZkLogin(tx2, jwt);
+                      const res2 = await suiClient.executeTransactionBlock({
+                        transactionBlock: transactionBlockSerialized,
+                        signature: signature,
+                        options: { showEffects: true }
+                      });
+                      
+                      setLastTxDigest(res2.digest);
+                      console.log("⚡ CLMM Zap Step 2 Success:", res2.digest);
+                      
+                      // Final Success Handling
+                      setSwapStatus('success');
+                      setAmountIn('');
+                      setQuote(null);
+                      setSuccessModalConfig({
+                          title: 'Zap Transfer Successful!',
+                          desc: `Successfully swapped ${fromToken.symbol} and sent ${toToken.symbol} to recipient (2 Steps).`,
+                          btnText: 'Close'
+                      });
+                      setTxWaitMessage('');
+                      refetchBalance();
+                      setHistoryRefreshTrigger(prev => prev + 1);
+                      setShowSuccessModal(true);
+                      triggerConfetti();
+                      return;
+
+                  } catch (err) {
+                      console.error("CLMM Zap Step 2 Failed:", err);
+                      setErrorMessage("Swap succeeded, but Transfer failed. Please transfer manually.");
+                      setSwapStatus('error');
+                      return;
+                  }
+              }
+
               setSwapStatus('success');
-              setAmountIn('');
-              setQuote(null);
+              
+              if (mode === 'transfer' && fromToken.symbol !== toToken.symbol) {
+                  setAmountIn('');
+                  setQuote(null);
+                  
+                  setSuccessModalConfig({
+                      title: 'Zap Transfer Successful!',
+                      desc: `Successfully swapped ${fromToken.symbol} and sent ${toToken.symbol} to recipient.`,
+                      btnText: 'Close'
+                  });
+              } else {
+                  setAmountIn('');
+                  setQuote(null);
+                  setSuccessModalConfig({
+                      title: 'Swap Successful!',
+                      desc: 'Your transaction has been processed successfully.',
+                      btnText: 'Close'
+                  });
+              }
+
               setTxWaitMessage('');
               refetchBalance();
               setHistoryRefreshTrigger(prev => prev + 1); // Trigger history refresh
               setShowSuccessModal(true);
 
               // Confetti Effect
-              const duration = 3000;
-              const end = Date.now() + duration;
-
-              const frame = () => {
-                confetti({
-                  particleCount: 5,
-                  angle: 60,
-                  spread: 55,
-                  origin: { x: 0 },
-                  colors: ['#3b82f6', '#10b981', '#6366f1']
-                });
-                confetti({
-                  particleCount: 5,
-                  angle: 120,
-                  spread: 55,
-                  origin: { x: 1 },
-                  colors: ['#3b82f6', '#10b981', '#6366f1']
-                });
-
-                if (Date.now() < end) {
-                  requestAnimationFrame(frame);
-                }
-              };
-              frame();
+              triggerConfetti();
             }, 2000);
-          } catch (error) {
-            console.error('zkLogin Swap Failed:', error);
-            setSwapStatus('error');
-            setTxWaitMessage('');
-            setErrorMessage(error instanceof Error ? error.message : 'zkLogin transaction failed');
-          }
+          });
       }
 
     } catch (e: unknown) {
       console.error(e);
       setSwapStatus('error');
-      setErrorMessage(e instanceof Error ? e.message : String(e));
+      const msg = e instanceof Error ? e.message : String(e);
+      setErrorMessage(getFriendlyErrorMessage(msg));
     }
+  };
+  
+  const triggerConfetti = () => {
+      const duration = 3000;
+      const end = Date.now() + duration;
+
+      const frame = () => {
+        confetti({
+          particleCount: 5,
+          angle: 60,
+          spread: 55,
+          origin: { x: 0 },
+          colors: ['#3b82f6', '#10b981', '#6366f1']
+        });
+        confetti({
+          particleCount: 5,
+          angle: 120,
+          spread: 55,
+          origin: { x: 1 },
+          colors: ['#3b82f6', '#10b981', '#6366f1']
+        });
+
+        if (Date.now() < end) {
+          requestAnimationFrame(frame);
+        }
+      };
+      frame();
   };
 
   // Calculate price impact
   const calculatePriceImpact = () => {
     if (!quote || !amountIn || parseFloat(amountIn) <= 0) return null;
 
-    // Simple price impact: compare actual output to theoretical output at spot price
-    // This is a simplified calculation - real implementation would use oracle prices
+    // Price Impact Calculation
+    // Compares the theoretical output (based on spot price) vs actual output (based on pool depth)
     const inputAmount = parseFloat(amountIn);
     const outputAmount = Number(quote.amountOut) / Math.pow(10, toToken.decimals);
 
-    // Rough estimate: assume 0.3% fee and minimal slippage for "fair" price
-    // In reality, this should compare to spot price from an oracle
-    const estimatedFairOutput = inputAmount * 0.997; // Rough estimate
+    // Baseline: Assume 0.3% LP fee is standard for V3 pools
+    const estimatedFairOutput = inputAmount * 0.997; 
     const impact = ((estimatedFairOutput - outputAmount) / estimatedFairOutput) * 100;
 
-    return Math.max(0, impact); // Don't show negative impact
+    return Math.max(0, impact); 
   };
 
   const priceImpact = calculatePriceImpact();
@@ -587,9 +708,29 @@ export default function SwapPage() {
     const pairs: Array<{ from: string; to: string }> = [];
     const availableTokens = TOKENS_LIST.filter(t => t.symbol !== fromToken.symbol);
 
-    // Show all available pairs with the selected fromToken
     availableTokens.forEach(token => {
-      pairs.push({ from: fromToken.symbol, to: token.symbol });
+      // 🛡️ Filter pairs based on available pools
+      // On Testnet, mostly SUI pairs exist. 
+      // Mainnet has more pairs (SUI-USDC, SUI-CETUS, USDC-CETUS).
+      
+      let isValidPair = false;
+
+      if (SUI_NETWORK === 'mainnet') {
+          // Mainnet Rules: 
+          // 1. SUI pairs with everything
+          // 2. USDC pairs with CETUS
+          const isSuiPair = fromToken.symbol === 'SUI' || token.symbol === 'SUI';
+          const isUsdcCetus = (fromToken.symbol === 'USDC' && token.symbol === 'CETUS') || (fromToken.symbol === 'CETUS' && token.symbol === 'USDC');
+          isValidPair = isSuiPair || isUsdcCetus;
+      } else {
+          // Testnet Rules:
+          // Only SUI pairs are reliably supported via direct pools
+          isValidPair = fromToken.symbol === 'SUI' || token.symbol === 'SUI';
+      }
+
+      if (isValidPair) {
+         pairs.push({ from: fromToken.symbol, to: token.symbol });
+      }
     });
 
     return pairs;
@@ -618,11 +759,11 @@ export default function SwapPage() {
           </div>
         </div>
 
-      <div className="max-w-md w-full bg-white rounded-2xl shadow-xl overflow-hidden">
+      <div className="max-w-md w-full bg-white rounded-2xl shadow-xl">
         {/* Header */}
-        <div className="bg-gradient-to-r from-blue-600 to-indigo-600 p-6 text-white flex justify-between items-center relative overflow-hidden">
+        <div className="bg-gradient-to-r from-blue-600 to-indigo-600 p-6 text-white flex justify-between items-center relative rounded-t-2xl">
           {/* Tabs */}
-          <div className="absolute top-0 left-0 w-full h-10 flex bg-black/10 backdrop-blur-sm">
+          <div className="absolute top-0 left-0 w-full h-10 flex bg-black/10 backdrop-blur-sm rounded-t-2xl">
             <button
               onClick={() => setMode('swap')}
               className={`flex-1 text-xs font-bold uppercase tracking-wider transition-all duration-200 ${
@@ -652,17 +793,18 @@ export default function SwapPage() {
           {/* Wallet / zkLogin */}
           <div className="flex gap-2 mt-6 items-center">
             {/* Settings Button */}
-            <div className="relative">
+            <div className="relative z-50">
                 <button 
                   onClick={() => setShowSettings(!showSettings)}
-                  className="p-2 bg-white/10 rounded-lg hover:bg-white/20 transition-colors border border-white/10"
+                  className="flex items-center gap-2 px-3 py-2 bg-white/10 rounded-lg hover:bg-white/20 transition-colors border border-white/10"
                   title="Slippage Settings"
                 >
                    <Settings className="w-4 h-4 text-white" />
+                   <span className="text-xs font-bold text-white/90">{slippage}%</span>
                 </button>
                 
                 {showSettings && (
-                   <div className="absolute left-0 top-12 bg-white rounded-xl shadow-xl border border-gray-100 p-4 w-64 text-gray-800 z-50 animate-in fade-in zoom-in-95 duration-200">
+                   <div className="absolute left-0 top-12 bg-white rounded-xl shadow-2xl border border-gray-100 p-4 w-64 text-gray-800 animate-in fade-in zoom-in-95 duration-200">
                       <div className="flex justify-between items-center mb-3">
                          <span className="font-bold text-sm">Slippage Tolerance</span>
                          <button onClick={() => setShowSettings(false)} className="text-gray-400 hover:text-gray-600">
@@ -776,7 +918,7 @@ export default function SwapPage() {
                  <span>{formattedBalance}</span>
                  {currentAddress && (
                    <button
-                     onClick={() => setAmountIn((balance - 0.01 > 0 ? balance - 0.01 : 0).toString())}
+                     onClick={handleMax}
                      className="text-blue-600 font-bold hover:text-blue-700 text-xs bg-blue-50 px-2 py-0.5 rounded ml-1 transition-colors"
                    >
                      MAX
@@ -981,19 +1123,29 @@ export default function SwapPage() {
                 </div>
               </div>
 
-              {/* Price Impact Warning */}
-              {priceImpact !== null && (
-                <div className={`p-3 rounded-lg border text-sm ${
-                  priceImpact > 5 ? 'bg-red-50 border-red-100 text-red-700' :
-                  priceImpact > 1 ? 'bg-yellow-50 border-yellow-100 text-yellow-700' :
-                  'bg-green-50 border-green-100 text-green-700'
-                }`}>
-                  <div className="flex justify-between items-center">
-                    <span className="font-medium">Price Impact</span>
-                    <span className="font-bold">{priceImpact.toFixed(2)}%</span>
+              {/* Price Impact & Slippage Info */}
+              <div className="flex gap-2 text-xs">
+                 {/* Price Impact */}
+                 {priceImpact !== null && (
+                    <div className={`flex-1 p-2 rounded-lg border flex justify-between items-center ${
+                      priceImpact > 5 ? 'bg-red-50 border-red-100 text-red-700' :
+                      priceImpact > 1 ? 'bg-yellow-50 border-yellow-100 text-yellow-700' :
+                      'bg-green-50 border-green-100 text-green-700'
+                    }`}>
+                      <span className="font-medium">Price Impact</span>
+                      <span className="font-bold">{priceImpact < 0.01 ? '<0.01' : priceImpact.toFixed(2)}%</span>
+                    </div>
+                  )}
+                  
+                  {/* Active Slippage Display */}
+                  <div className="flex-1 p-2 rounded-lg border bg-gray-50 border-gray-100 text-gray-600 flex justify-between items-center cursor-pointer hover:bg-gray-100 transition-colors"
+                       onClick={() => setShowSettings(true)}
+                       title="Click to adjust"
+                  >
+                      <span className="font-medium">Max Slippage</span>
+                      <span className="font-bold text-gray-800">{slippage}%</span>
                   </div>
-                </div>
-              )}
+              </div>
 
               {/* Multiple Routes Selection */}
               {quote && quote.source === 'aggregator' && quote.routes && quote.routes.length > 1 && (
@@ -1060,57 +1212,139 @@ export default function SwapPage() {
              </div>
           ) : (
             <button
+              onClick={() => initiateAction(mode)}
               disabled={
                   loading || 
                   !amountIn || 
                   swapStatus === 'swapping' || 
-                  (mode === 'swap' && !quote) || 
-                  (mode === 'transfer' && (!recipientAddress || recipientAddress.length < 10))
+                  parseFloat(amountIn) <= 0 || 
+                  isHighPriceImpact ||
+                  (mode === 'transfer' && !isValidSuiAddress(recipientAddress))
               }
-              onClick={mode === 'swap' ? handleSwap : handleTransfer}
-              className={`w-full mt-6 py-4 rounded-xl font-bold text-lg transition-all duration-300 transform active:scale-[0.98] relative z-20 overflow-hidden ${
-                (loading || swapStatus === 'swapping')
-                  ? 'bg-gray-800 text-gray-500 cursor-wait'
-                  : 'bg-gradient-to-r from-blue-600 to-cyan-500 hover:from-blue-500 hover:to-cyan-400 text-white shadow-[0_0_30px_rgba(6,182,212,0.4)]'
+              className={`w-full py-4 mt-4 rounded-xl font-bold text-lg transition-all duration-300 transform hover:scale-[1.02] active:scale-[0.98] shadow-lg ${
+                isHighPriceImpact
+                  ? 'bg-red-500 text-white hover:bg-red-600'
+                  : loading || swapStatus === 'swapping'
+                  ? 'bg-gray-100 text-gray-400 cursor-wait'
+                  : mode === 'swap' 
+                    ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white hover:shadow-blue-500/30' 
+                    : 'bg-gradient-to-r from-purple-600 to-pink-600 text-white hover:shadow-purple-500/30'
               }`}
             >
-              {swapStatus === 'swapping' ? (
-                <span className="flex items-center justify-center gap-2 animate-pulse">
-                  <RefreshCcw className="animate-spin" size={20} /> 
-                  {mode === 'swap' ? 'Swapping...' : (fromToken.symbol !== toToken.symbol ? 'Converting...' : 'Sending...')}
-                </span>
-              ) : (
-                mode === 'swap' 
-                  ? 'Swap Now' 
-                  : (fromToken.symbol !== toToken.symbol ? 'Step 1: Convert Tokens' : 'Send Assets')
-              )}
+               {loading ? 'Finding Best Route...' : 
+                swapStatus === 'swapping' ? 'Processing Transaction...' :
+                isHighPriceImpact ? 'Price Impact Too High' :
+                mode === 'swap' ? 'Review Swap' : 'Review Transfer'}
             </button>
           )}
+
+      {/* Review Modal */}
+      {showReviewModal && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[100] animate-in fade-in duration-200">
+            <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-sm m-4 transform transition-all scale-100">
+                <h3 className="text-xl font-bold mb-4 text-gray-800">Review Transaction</h3>
+                
+                <div className="space-y-4">
+                    {/* From */}
+                    <div className="flex justify-between items-center p-3 bg-gray-50 rounded-lg">
+                        <span className="text-gray-500 text-sm">You Pay</span>
+                        <div className="text-right">
+                            <div className="font-bold text-lg">{amountIn} {fromToken.symbol}</div>
+                        </div>
+                    </div>
+
+                    {/* Arrow */}
+                    <div className="flex justify-center text-gray-400">
+                        <ArrowDownUp className="w-5 h-5" />
+                    </div>
+
+                    {/* To */}
+                    <div className="flex justify-between items-center p-3 bg-gray-50 rounded-lg">
+                        <span className="text-gray-500 text-sm">You Receive</span>
+                        <div className="text-right">
+                            <div className="font-bold text-lg text-green-600">
+                                {quote ? (Number(quote.amountOut) / Math.pow(10, toToken.decimals)).toFixed(4) : '---'} {toToken.symbol}
+                            </div>
+                            {mode === 'transfer' && fromToken.symbol !== toToken.symbol && (
+                                <div className="text-xs text-purple-600 font-bold mt-1">Zap Mode Active ⚡</div>
+                            )}
+                        </div>
+                    </div>
+
+                    {/* Recipient (Only for Transfer) */}
+                    {mode === 'transfer' && (
+                        <div className="p-3 bg-purple-50 border border-purple-100 rounded-lg">
+                            <div className="text-xs text-purple-800 font-bold mb-1">Send to Recipient</div>
+                            <div className="font-mono text-xs break-all text-gray-700">
+                                {recipientAddress}
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Details */}
+                    <div className="pt-4 border-t border-gray-100 space-y-2 text-sm">
+                        <div className="flex justify-between">
+                            <span className="text-gray-500">Network Cost</span>
+                            <span className="font-medium text-gray-800">{gasEstimate} SUI</span>
+                        </div>
+                        <div className="flex justify-between">
+                            <span className="text-gray-500">Max Slippage</span>
+                            <span className="font-medium text-gray-800">{slippage}%</span>
+                        </div>
+                    </div>
+
+                    {/* Buttons */}
+                    <div className="flex gap-3 mt-6">
+                        <button 
+                            onClick={() => setShowReviewModal(false)}
+                            className="flex-1 py-3 rounded-xl font-bold text-gray-600 bg-gray-100 hover:bg-gray-200 transition-colors"
+                        >
+                            Cancel
+                        </button>
+                        <button 
+                            onClick={handleConfirmAction}
+                            className={`flex-1 py-3 rounded-xl font-bold text-white shadow-lg transition-transform active:scale-95 ${
+                                mode === 'swap' 
+                                ? 'bg-gradient-to-r from-blue-600 to-indigo-600 hover:shadow-blue-500/30' 
+                                : 'bg-gradient-to-r from-purple-600 to-pink-600 hover:shadow-purple-500/30'
+                            }`}
+                        >
+                            Confirm {mode === 'swap' ? 'Swap' : 'Send'}
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+      )}
           
-          {/* Zap Mode Step Indicator */}
-          {mode === 'transfer' && fromToken.symbol !== toToken.symbol && (
-              <div className="bg-purple-50 p-3 rounded-lg border border-purple-200 text-sm text-purple-800 space-y-2">
-                  <div className="font-bold flex items-center gap-2">
-                      <span className="bg-purple-600 text-white w-5 h-5 rounded-full flex items-center justify-center text-xs">i</span>
-                      Two-Step Transfer
-                  </div>
-                  <div className="flex items-center gap-2 text-xs opacity-80">
-                      <div className="flex-1 p-2 bg-white rounded border border-purple-100 flex items-center justify-center font-bold">
-                          1. Convert
-                      </div>
-                      <span className="text-gray-400">→</span>
-                      <div className="flex-1 p-2 bg-white/50 rounded border border-purple-100 flex items-center justify-center text-gray-500">
-                          2. Send
-                      </div>
-                  </div>
-                  <div className="text-xs text-purple-700/80 leading-relaxed">
-                      To send <b>{toToken.symbol}</b>, you first need to convert your <b>{fromToken.symbol}</b>. 
-                      Click below to convert, then click again to send.
-                  </div>
+          {/* Stepper Indicator */}
+          {swapStatus !== 'idle' && (
+              <div className="px-2">
+                 <TransactionStepper steps={[
+                    { 
+                        label: 'Sign', 
+                        status: swapStatus === 'swapping' ? 'current' : (swapStatus === 'confirming' || swapStatus === 'success') ? 'completed' : swapStatus === 'error' ? 'error' : 'pending' 
+                    },
+                    { 
+                        label: 'Network', 
+                        status: swapStatus === 'confirming' ? 'current' : swapStatus === 'success' ? 'completed' : 'pending' 
+                    },
+                    { 
+                        label: 'Done', 
+                        status: swapStatus === 'success' ? 'completed' : 'pending' 
+                    }
+                 ]} />
               </div>
           )}
 
           {/* Status Messages */}
+          {isWrongNetwork && (
+              <div className="p-3 bg-red-100 text-red-700 rounded-lg text-center text-sm font-bold flex items-center gap-2 justify-center border border-red-200">
+                  <XCircle size={18} />
+                  <span>Wrong Network! Switch Wallet to {SUI_NETWORK.toUpperCase()}</span>
+              </div>
+          )}
+
           {txWaitMessage && (
               <div className="p-3 bg-blue-100 text-blue-700 rounded-lg text-center text-sm flex items-center gap-2 justify-center animate-pulse">
                   <div className="w-2 h-2 bg-blue-700 rounded-full animate-bounce"></div>
@@ -1144,8 +1378,8 @@ export default function SwapPage() {
              <div className="mx-auto flex items-center justify-center h-16 w-16 rounded-full bg-green-100 mb-6">
                 <CheckCircle2 className="h-10 w-10 text-green-600" />
              </div>
-             <h3 className="text-2xl font-bold text-gray-900 mb-2">Swap Successful!</h3>
-             <p className="text-gray-500 mb-6">Your transaction has been processed successfully on the Sui Network.</p>
+             <h3 className="text-2xl font-bold text-gray-900 mb-2">{successModalConfig.title}</h3>
+             <p className="text-gray-500 mb-6">{successModalConfig.desc}</p>
              
              {lastTxDigest && (
                <a
@@ -1159,10 +1393,17 @@ export default function SwapPage() {
              )}
 
              <button 
-               onClick={() => setShowSuccessModal(false)}
+               onClick={() => {
+                   setShowSuccessModal(false);
+                   if (successModalConfig.btnText === 'Proceed to Transfer') {
+                       // Logic to open Transfer Review Modal immediately?
+                       // Or just let user click Transfer button.
+                       // Just closing is enough as state is updated.
+                   }
+               }}
                className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-xl transition-colors shadow-lg shadow-blue-500/30"
              >
-               Close
+               {successModalConfig.btnText}
              </button>
           </div>
         </div>

@@ -15,7 +15,9 @@
       "Bash(sui move build:*)",
       "Bash(lsof:*)",
       "Bash(xargs kill:*)",
-      "Bash(npm run lint)"
+      "Bash(npm run lint)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(taskkill:*)"
     ]
   }
 }

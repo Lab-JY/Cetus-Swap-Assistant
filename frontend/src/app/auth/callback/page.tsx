@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { jwtDecode } from 'jwt-decode';
 import { RANDOMNESS_SESSION_KEY, MAX_EPOCH_KEY } from '@/utils/zklogin';
+import { secureStorage } from '@/utils/storage';
 import { jwtToAddress } from '@mysten/zklogin';
 
 export default function AuthCallback() {
@@ -25,9 +26,9 @@ export default function AuthCallback() {
         // 2. Decode JWT to get 'sub' (Subject ID)
         const decodedJwt = jwtDecode<{ sub: string }>(idToken);
 
-        // 3. Get Ephemeral Data from Session
-        const randomness = window.sessionStorage.getItem(RANDOMNESS_SESSION_KEY);
-        const maxEpoch = window.sessionStorage.getItem(MAX_EPOCH_KEY);
+        // 3. Get Ephemeral Data from Secure Session
+        const randomness = secureStorage.getItem<string>(RANDOMNESS_SESSION_KEY);
+        const maxEpoch = secureStorage.getItem<string>(MAX_EPOCH_KEY);
 
         if (!randomness || !maxEpoch) {
            setStatus('Error: Session expired. Please login again.');
@@ -45,10 +46,10 @@ export default function AuthCallback() {
         // 5. Derive zkLogin Address
         const zkLoginAddress = jwtToAddress(idToken, userSalt);
 
-        // 6. Store everything in Session Storage for the main page to use
-        window.sessionStorage.setItem('zklogin_jwt', idToken);
-        window.sessionStorage.setItem('zklogin_salt', userSalt.toString());
-        window.sessionStorage.setItem('zklogin_address', zkLoginAddress);
+        // 6. Store everything in Secure Session Storage
+        secureStorage.setItem('zklogin_jwt', idToken);
+        secureStorage.setItem('zklogin_salt', userSalt.toString());
+        secureStorage.setItem('zklogin_address', zkLoginAddress);
 
         setStatus(`Login Successful! Redirecting to ${zkLoginAddress.slice(0, 6)}...`);
         setTimeout(() => router.push('/'), 1000);

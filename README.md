@@ -37,30 +37,39 @@ This project implements a **Cetus Trading Terminal** with deep integration of th
 
 ## 🌟 Key Features
 
-### 1. Hybrid Routing Engine
-*   **Execution**: Uses **Cetus Aggregator SDK** to find trading paths.
-*   **Fallback**: Switches to **Cetus CLMM SDK** interaction if the Aggregator is unavailable.
-*   **Reliability**: Designed to function across different network environments.
+### 1. Hybrid Routing Engine (Cetus Powered)
+*   **Smart Aggregation**: Leverages **Cetus Aggregator SDK** to find the most efficient trading paths across liquidity sources.
+*   **Resilient Fallback**: Seamlessly switches to **Cetus CLMM SDK** for direct pool interaction if the aggregator API is unreachable.
+*   **Dual-Mode Compatibility**: Optimized for both **Mainnet** (Aggregator-first) and **Testnet** (Direct Pool focus), ensuring a consistent dev experience.
 
-### 2. Atomic On-Chain Analytics (PTB Powered)
-*   **Structure**: Swap transactions are constructed as **Programmable Transaction Blocks (PTBs)**.
-*   **Recording**: A Move call to `cetus_swap::swap_helper::record_swap_event` is appended to the transaction block.
-*   **Data**: Analytics are derived from on-chain events.
+### 2. Atomic Zap (Swap & Transfer)
+Demonstrating the true power of **Sui Programmable Transaction Blocks (PTB)**:
+*   **One-Click Zap**: Bundles a Token Swap and a Transfer into a **single atomic transaction**.
+*   **Efficiency**: Eliminates the need for multiple approvals. Users sign once, and the protocol handles the swap logic and immediately routes the output tokens to the recipient.
+*   **Cross-Token Payments**: Enables "Pay in SUI, Recipient gets USDC" scenarios effortlessly.
 
-### 3. ⚡ Zap Mode: Atomic PTB Composability
-"Zap Mode" demonstrates the power of **Sui Programmable Transaction Blocks (PTB)** by bundling complex operations into a single atomic transaction. Unlike traditional "Approve → Swap" flows, our architecture achieves:
-*   **Dynamic Input Management**: Automatically merges dust coins (`MergeCoins`) or splits exact amounts (`SplitCoins`) within the same block to prepare funds.
-*   **Embedded Protocol Logic**: Cetus Swap logic is executed as an embedded command sequence.
-*   **Atomic Verification**: A custom Move call (`record_swap_event`) is chained to the swap. The event is *only* emitted if the swap succeeds, ensuring 100% accurate on-chain analytics.
+### 3. Web2-Native Onboarding (zkLogin)
+*   **Zero Friction**: Users can trade using just their **Google Account**. No browser extensions or seed phrases required.
+*   **Non-Custodial**: Powered by **Sui zkLogin**, maintaining full self-custody security while offering a Web2-like UX.
+*   **Session Management**: Implements secure session storage for ephemeral keys, allowing users to trade continuously without re-signing every action.
 
-### 4. Web2 Onboarding (zkLogin)
-*   **Authentication**: Users sign in with a **Google Account**.
-*   **Mechanism**: Uses **zkLogin** and the official Sui Proving Service to map Web2 identities to Web3 addresses.
-*   **Security**: Uses ephemeral, session-based signing keys.
+### 4. Verifiable On-Chain Analytics
+*   **Atomic Event Recording**: A custom Move contract (`cetus_swap::swap_helper`) is integrated into the PTB flow.
+*   **Accuracy**: The `SwapEvent` is *only* emitted if the swap transaction succeeds, guaranteeing 100% accurate data for history tracking.
+*   **Unified History**: The frontend intelligently aggregates fragmented on-chain events (like CLMM's split swap/transfer actions) into cohesive "Zap" records.
 
-### 5. History Tracking
-*   **Data Source**: The Swap History pulls data from Sui blockchain events.
-*   **Time Handling**: Supports different timestamp formats (Epoch vs. Milliseconds).
+---
+
+## 🤖 AI-Augmented Development
+
+This project was built with the assistance of **Trae**, an AI-powered IDE. The collaboration highlighted how AI can accelerate Web3 development:
+
+*   **Smart Contract Generation**: AI assisted in scaffolding the Move 2024 smart contracts, ensuring adherence to the latest syntax and security patterns.
+*   **Frontend Logic**: Complex React hooks for state management and the "Hybrid Routing" logic were co-authored with AI to handle edge cases efficiently.
+*   **Debugging & Optimization**: AI played a crucial role in debugging the **CLMM Zap** logic, identifying the need for "Fuzzy Time Matching" to group split blockchain events into unified UI records.
+*   **Documentation**: Automated generation of technical documentation and inline code comments to improve maintainability.
+
+> See [AI_USAGE_DISCLOSURE.md](./AI_USAGE_DISCLOSURE.md) for a detailed breakdown of prompts and workflows.
 
 ---
 

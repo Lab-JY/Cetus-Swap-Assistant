@@ -1,6 +1,9 @@
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 import { generateNonce, generateRandomness, getZkLoginSignature } from '@mysten/zklogin';
 import { Transaction } from '@mysten/sui/transactions';
+import { SuiClient } from '@mysten/sui/client';
+import { secureStorage } from './storage';
+import { SUI_NETWORK } from './config';
 
 // ⚠️ Replace with your actual Google Client ID
 // For local dev (localhost:3000), you can use this demo ID or create your own at console.cloud.google.com
@@ -14,27 +17,13 @@ export const KEY_PAIR_SESSION_KEY = 'zklogin_ephemeral_key';
 export const RANDOMNESS_SESSION_KEY = 'zklogin_randomness';
 export const MAX_EPOCH_KEY = 'zklogin_max_epoch';
 
-interface ZkProof {
-  proofPoints: {
-    a: string[];
-    b: string[][];
-    c: string[];
-  };
-  issBase64Details: {
-    value: string;
-    indexMod4: number;
-  };
-  headerBase64: string;
-  addressSeed: string;
-}
-
 export function setupEphemeralKey() {
     const ephemeralKeyPair = new Ed25519Keypair();
     const randomness = generateRandomness();
     
-    // Store in Session Storage (safer than LocalStorage for keys, though ephemeral)
-    window.sessionStorage.setItem(KEY_PAIR_SESSION_KEY, ephemeralKeyPair.getSecretKey());
-    window.sessionStorage.setItem(RANDOMNESS_SESSION_KEY, randomness);
+    // Store in Secure Session Storage
+    secureStorage.setItem(KEY_PAIR_SESSION_KEY, ephemeralKeyPair.getSecretKey());
+    secureStorage.setItem(RANDOMNESS_SESSION_KEY, randomness);
     
     return {
         ephemeralKeyPair,
@@ -43,7 +32,7 @@ export function setupEphemeralKey() {
 }
 
 export function getEphemeralKey() {
-    const privateKey = window.sessionStorage.getItem(KEY_PAIR_SESSION_KEY);
+    const privateKey = secureStorage.getItem<string>(KEY_PAIR_SESSION_KEY);
     if (!privateKey) return null;
     return Ed25519Keypair.fromSecretKey(privateKey);
 }
@@ -53,7 +42,7 @@ export function getGoogleLoginUrl(epoch: number) {
     
     // Expiry: Current Epoch + 2 (approx 48 hours)
     const maxEpoch = epoch + 2; 
-    window.sessionStorage.setItem(MAX_EPOCH_KEY, String(maxEpoch));
+    secureStorage.setItem(MAX_EPOCH_KEY, String(maxEpoch));
 
     const nonce = generateNonce(
         ephemeralKeyPair.getPublicKey(), 
@@ -63,69 +52,63 @@ export function getGoogleLoginUrl(epoch: number) {
 
     const params = new URLSearchParams({
         client_id: GOOGLE_CLIENT_ID,
-        response_type: 'id_token',
         redirect_uri: REDIRECT_URI,
+        response_type: 'id_token',
         scope: 'openid email profile',
-        nonce: nonce, // Important: Binds the ephemeral key to the JWT
+        nonce: nonce,
+        prompt: 'select_account'
     });
-
+    
     return `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
 }
 
 export function clearZkLoginSession() {
-    if (typeof window === 'undefined') return;
-    window.sessionStorage.removeItem(KEY_PAIR_SESSION_KEY);
-    window.sessionStorage.removeItem(RANDOMNESS_SESSION_KEY);
-    window.sessionStorage.removeItem(MAX_EPOCH_KEY);
+    secureStorage.removeItem(KEY_PAIR_SESSION_KEY);
+    secureStorage.removeItem(RANDOMNESS_SESSION_KEY);
+    secureStorage.removeItem(MAX_EPOCH_KEY);
+    secureStorage.removeItem('zklogin_jwt');
+    secureStorage.removeItem('zklogin_salt');
+    secureStorage.removeItem('zklogin_address');
 }
 
-/**
- * Call the official Sui Proving Service to get ZK proof
- * This is required to sign transactions with zkLogin
- */
-export async function getZkProofFromProvingService(jwt: string): Promise<ZkProof> {
+export async function getZkProofFromProvingService(jwt: string) {
     try {
         console.log('🔐 Calling Sui Proving Service to generate ZK proof...');
 
         const ephemeralKey = getEphemeralKey();
-        const randomness = window.sessionStorage.getItem(RANDOMNESS_SESSION_KEY);
-        const maxEpoch = window.sessionStorage.getItem(MAX_EPOCH_KEY);
+        const randomness = secureStorage.getItem<string>(RANDOMNESS_SESSION_KEY);
+        const maxEpoch = secureStorage.getItem<string>(MAX_EPOCH_KEY);
+        const salt = secureStorage.getItem<string>('zklogin_salt');
 
-        if (!ephemeralKey || !randomness || !maxEpoch) {
+        if (!ephemeralKey || !randomness || !maxEpoch || !salt) {
             throw new Error('Missing ephemeral key or session data');
         }
 
-        const response = await fetch(`${PROVING_SERVICE_URL}/prove`, {
+        const response = await fetch(PROVING_SERVICE_URL, {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                jwt: jwt,
-                ephemeralPublicKey: ephemeralKey.getPublicKey().toSuiPublicKey(),
-                randomness: randomness,
-                maxEpoch: parseInt(maxEpoch),
-            }),
+                jwt,
+                extendedEphemeralPublicKey: ephemeralKey.getPublicKey().toSuiPublicKey(),
+                maxEpoch: Number(maxEpoch),
+                jwtRandomness: randomness,
+                salt: salt,
+                keyClaimName: 'sub'
+            })
         });
 
         if (!response.ok) {
-            const error = await response.text();
-            throw new Error(`Proving Service error: ${error}`);
+            throw new Error(`Proving Service failed: ${response.statusText}`);
         }
 
-        const zkProof = await response.json();
-        console.log('✅ ZK proof generated successfully');
-        return zkProof;
+        return await response.json();
+
     } catch (error) {
-        console.error('❌ Error getting ZK proof from Proving Service:', error);
+        console.error('Proving Service Error:', error);
         throw error;
     }
 }
 
-/**
- * Sign a transaction using zkLogin
- * This creates a zkLogin signature that can be submitted to Sui network
- */
 export async function signTransactionWithZkLogin(
     tx: Transaction,
     jwt: string
@@ -143,38 +126,38 @@ export async function signTransactionWithZkLogin(
         }
 
         // Get maxEpoch from session
-        const maxEpochStr = window.sessionStorage.getItem(MAX_EPOCH_KEY);
+        const maxEpochStr = secureStorage.getItem<string>(MAX_EPOCH_KEY);
         if (!maxEpochStr) {
             throw new Error('Max epoch not found in session');
         }
-        const maxEpoch = parseInt(maxEpochStr);
 
-        // Serialize the transaction
-        const transactionBlockSerialized = tx.serialize();
-
-        // Sign the serialized transaction bytes with ephemeral key
-        const signatureBytes = await ephemeralKey.sign(Buffer.from(transactionBlockSerialized, 'base64'));
-
-        // Create zkLogin signature using the proof from Proving Service
-        const zkLoginSignature = getZkLoginSignature({
-            inputs: {
-                proofPoints: zkProof.proofPoints,
-                issBase64Details: zkProof.issBase64Details,
-                headerBase64: zkProof.headerBase64,
-                addressSeed: zkProof.addressSeed,
-            },
-            userSignature: signatureBytes,
-            maxEpoch: maxEpoch,
+        // Initialize client to build transaction
+        const client = new SuiClient({ 
+            url: SUI_NETWORK === 'mainnet' 
+                ? 'https://fullnode.mainnet.sui.io' 
+                : 'https://fullnode.testnet.sui.io' 
         });
 
-        console.log('✅ Transaction signed with zkLogin');
+        // Sign with ephemeral key
+        const { bytes, signature: userSignature } = await tx.sign({
+            client,
+            signer: ephemeralKey
+        });
+
+        // Generate zkLogin signature
+        const zkLoginSignature = getZkLoginSignature({
+            inputs: zkProof,
+            maxEpoch: Number(maxEpochStr),
+            userSignature,
+        });
 
         return {
-            transactionBlockSerialized,
-            signature: zkLoginSignature,
+            transactionBlockSerialized: bytes,
+            signature: zkLoginSignature
         };
+
     } catch (error) {
-        console.error('❌ Error signing transaction with zkLogin:', error);
+        console.error('Sign with zkLogin Error:', error);
         throw error;
     }
 }

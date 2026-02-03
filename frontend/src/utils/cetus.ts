@@ -2,6 +2,8 @@
 import { AggregatorClient, Env } from "@cetusprotocol/aggregator-sdk";
 import { initCetusSDK } from "@cetusprotocol/cetus-sui-clmm-sdk";
 import { Transaction } from "@mysten/sui/transactions";
+import { SuiClient } from "@mysten/sui/client";
+import { normalizeSuiAddress } from "@mysten/sui/utils";
 import BN from "bn.js";
 import { TOKENS, SUI_NETWORK, POOL_IDS, CETUS_SWAP_PACKAGE_ID } from "./config";
 
@@ -30,11 +32,10 @@ export const WUSDC_COIN_TYPE = TOKENS.wUSDC;
 export async function getSwapQuote(
     fromCoinType: string,
     toCoinType: string,
-    amountIn: number,
+    amountIn: number | string,
     userAddress: string,
     byAmountIn: boolean = true
 ) {
-    console.log(`🔍 Quote: ${amountIn} ${fromCoinType} -> ${toCoinType}`);
     const amount = new BN(amountIn);
 
     // Set sender address for CLMM SDK
@@ -45,7 +46,6 @@ export async function getSwapQuote(
     try {
         // 1️⃣ Try Aggregator First (Mainnet & Testnet)
         // Note: Testnet only supports limited providers (Cetus, DeepBook)
-        console.log(`Trying Aggregator on ${SUI_NETWORK}...`);
         
         const routerData = await aggregator.findRouters({
             from: fromCoinType,
@@ -55,11 +55,6 @@ export async function getSwapQuote(
         });
 
         if (routerData && routerData.paths && routerData.paths.length > 0) {
-            console.log("✅ Aggregator Routes Found:", {
-                totalPaths: routerData.paths.length,
-                bestAmountOut: routerData.amountOut.toString()
-            });
-
             // RouterDataV3 returns paths as a flat array, we need to group them into routes
             // For now, treat each path as a separate route option
             const routes = routerData.paths.map((path: any, idx: number) => {
@@ -99,42 +94,33 @@ export async function getSwapQuote(
 
     // 2️⃣ Fallback to Direct Pool (CLMM)
     try {
-        console.log("Trying Direct Pool Fallback...");
         // Identify Pool ID based on token pair
         let poolAddress = '';
         const network = SUI_NETWORK === 'mainnet' ? 'mainnet' : 'testnet';
-        const pools = POOL_IDS[network];
+        const pools = POOL_IDS[network] as any;
 
-        // Check for SUI-USDC pair (Mainnet)
-        if ((fromCoinType === TOKENS.SUI && toCoinType === TOKENS.USDC) ||
-            (fromCoinType === TOKENS.USDC && toCoinType === TOKENS.SUI)) {
-            poolAddress = (pools as any).SUI_USDC;
+        const pairKey = `${fromCoinType}-${toCoinType}`;
+        const reversePairKey = `${toCoinType}-${fromCoinType}`;
+        
+        let POOL_MAP: Record<string, string> = {};
+
+        if (network === 'mainnet') {
+             POOL_MAP = {
+                [`${TOKENS.SUI}-${TOKENS.USDC}`]: pools.SUI_USDC,
+                [`${TOKENS.SUI}-${TOKENS.CETUS}`]: pools.SUI_CETUS,
+                [`${TOKENS.USDC}-${TOKENS.CETUS}`]: pools.USDC_CETUS,
+             };
+        } else {
+             // Testnet
+             POOL_MAP = {
+                [`${TOKENS.SUI}-${(TOKENS as any).MEME}`]: pools.SUI_MEME,
+                [`${TOKENS.SUI}-${(TOKENS as any).IDOL_APPLE}`]: pools.SUI_IDOL_APPLE,
+                [`${TOKENS.SUI}-${(TOKENS as any).IDOL_DGRAN}`]: pools.SUI_IDOL_DGRAN,
+             };
         }
-        // Check for SUI-CETUS pair (Mainnet)
-        else if ((fromCoinType === TOKENS.SUI && toCoinType === TOKENS.CETUS) ||
-                 (fromCoinType === TOKENS.CETUS && toCoinType === TOKENS.SUI)) {
-            poolAddress = (pools as any).SUI_CETUS;
-        }
-        // Check for USDC-CETUS pair (Mainnet)
-        else if ((fromCoinType === TOKENS.USDC && toCoinType === TOKENS.CETUS) ||
-                 (fromCoinType === TOKENS.CETUS && toCoinType === TOKENS.USDC)) {
-            poolAddress = (pools as any).USDC_CETUS;
-        }
-        // Check for SUI-MEME pair (Testnet)
-        else if ((fromCoinType === TOKENS.SUI && toCoinType === (TOKENS as any).MEME) ||
-                 (fromCoinType === (TOKENS as any).MEME && toCoinType === TOKENS.SUI)) {
-            poolAddress = (pools as any).SUI_MEME;
-        }
-        // Check for SUI-IDOL_APPLE pair (Testnet)
-        else if ((fromCoinType === TOKENS.SUI && toCoinType === (TOKENS as any).IDOL_APPLE) ||
-                 (fromCoinType === (TOKENS as any).IDOL_APPLE && toCoinType === TOKENS.SUI)) {
-            poolAddress = (pools as any).SUI_IDOL_APPLE;
-        }
-        // Check for SUI-IDOL_DGRAN pair (Testnet)
-        else if ((fromCoinType === TOKENS.SUI && toCoinType === (TOKENS as any).IDOL_DGRAN) ||
-                 (fromCoinType === (TOKENS as any).IDOL_DGRAN && toCoinType === TOKENS.SUI)) {
-            poolAddress = (pools as any).SUI_IDOL_DGRAN;
-        }
+
+        // Check both directions
+        poolAddress = POOL_MAP[pairKey] || POOL_MAP[reversePairKey] || '';
 
         if (!poolAddress) {
             const errorMsg = "This token pair is not supported. Please select a different pair.";
@@ -165,15 +151,12 @@ export async function getSwapQuote(
 
         if (!res) {
             const errorMsg = "Failed to get quote for this pair. Please try again.";
-            console.error("❌ Direct Pool Quote returned null");
             return {
                 error: true,
                 errorMessage: errorMsg,
                 source: 'error'
             };
         }
-
-        console.log("✅ Direct Pool Quote Found:", res.estimatedAmountOut.toString());
 
         return {
             amountOut: new BN(res.estimatedAmountOut),
@@ -210,8 +193,6 @@ export async function buildSimpleSwapTx(
 ): Promise<Transaction> {
     if (!quote) throw new Error("Invalid Quote Object");
 
-    console.log(`🏗️ Building Swap Transaction via ${quote.source === 'aggregator' ? 'Aggregator' : 'CLMM'}...`);
-    
     let finalTx: Transaction;
 
     if (quote.source === 'aggregator') {
@@ -220,37 +201,25 @@ export async function buildSimpleSwapTx(
         // Set sender address on transaction for Aggregator SDK
         tx.setSender(userAddress);
         
-        // Use routerSwap which returns the output Coin
-        // However, the current SDK binding for routerSwap might return void or modify tx in place
-        // The aggregator SDK usually handles the transfer to sender internally if not specified
-        // But for PTB, we want the output coin to chain it.
-        // Let's check if we can intercept the output.
-        // The SDK's routerSwap appends commands to tx.
-        // If we want to transfer the output to someone else, we need to know WHICH object is the output.
-        // This is tricky with Aggregator SDK as it might not expose the result coin easily in TS.
-        
-        // WORKAROUND FOR AGGREGATOR ZAP:
-        // The aggregator usually sends output to tx.sender.
-        // If we want to send to someone else, we need to do it in 2 steps OR
-        // we need to be able to access the output coin from the PTB result.
-        // Since we can't easily get the output coin from the black-box SDK call,
-        // we might have to stick to 2-step for Aggregator, OR
-        // we rely on the fact that the output coin ends up in the user's wallet, 
-        // and we can't easily chain it in the SAME PTB unless the SDK returns the Coin argument.
-        
-        // BUT for CLMM (Direct Pool), we create the commands ourselves so we HAVE the coin.
-        
-        await aggregator.routerSwap({
+        // Use routerSwap which appends commands to tx.
+        const targetCoin = await aggregator.routerSwap({
             router: router,
             txb: tx as any,
             inputCoin: inputCoin,
             slippage: slippage,
         });
+
+        if (isZap && recipient) {
+            // We MUST use the custom buildTransferTx to trigger the TransferEvent
+            await buildTransferTx(tx, targetCoin, recipient, toCoinType, "Zap Transfer");
+        } else {
+            // Standard Swap: Transfer output to user
+            // We use transferOrDestroyCoin from SDK if available, or manual transfer
+            // Using manual transfer to ensure compatibility with our PTB structure
+            tx.transferObjects([targetCoin], tx.pure.address(userAddress));
+        }
+
         finalTx = tx;
-        
-        // If it's aggregator, we can't easily do atomic zap because we don't handle the output coin.
-        // It goes to userAddress automatically.
-        // So for Aggregator, we might still need 2 steps or just let it go to user.
         
     } else {
         // CLMM Direct Swap - creates its own transaction
@@ -258,14 +227,7 @@ export async function buildSimpleSwapTx(
         const toAmount = new BN(quote.amountOut);
         const amountLimit = adjustForSlippage(toAmount, slippage, !quote.a2b);
 
-        // We need to use a custom payload creation to get the Coin back
-        // The SDK's createSwapTransactionPayload returns a full Transaction, but we might want to append.
-        // Actually, createSwapTransactionPayload builds a fresh transaction.
-        
-        // If we want to chain, we should use the lower level move calls if possible,
-        // OR we just use the Transaction it returns and append to it?
-        // YES! We can append to the transaction returned by CLMM.
-        
+        // Create payload using SDK
         finalTx = await cetusClmm.Swap.createSwapTransactionPayload({
             pool_id: pool.poolAddress,
             a2b: quote.a2b,
@@ -275,43 +237,12 @@ export async function buildSimpleSwapTx(
             coinTypeA: pool.coinTypeA,
             coinTypeB: pool.coinTypeB,
         });
-        
-        // For CLMM, the createSwapTransactionPayload typically transfers the output to sender at the end.
-        // If we want to intercept it, we would need to construct the PTB manually using moveCall.
-        // But the SDK abstracts that.
-        // The SDK function `createSwapTransactionPayload` likely ends with `transfer::public_transfer`.
-        
-        // If we want to Zap, we need to perform the transfer *instead* of the default transfer.
-        // Or we transfer it *again*? No, once transferred, it's gone from PTB scope.
-        
-        // So, for true atomic Zap with SDKs that auto-transfer, it is HARD.
-        // We would need to manually build the move calls for swap.
-        
-        // HOWEVER, we can cheat:
-        // 1. Swap (Output goes to User)
-        // 2. Transfer (User sends to Recipient) - this requires a second signature/tx if not in same PTB.
-        // BUT, if we are in the same PTB, we don't know the Object ID of the new coin yet.
-        
-        // SOLUTION:
-        // Use `flash_swap` or similar? No.
-        
-        // The only way to do Atomic Zap in one PTB is if we have control over the output Coin object.
-        // Since the SDKs (both Aggregator and CLMM high-level) auto-transfer to sender,
-        // we CANNOT easily chain a transfer to someone else in the same PTB without writing low-level Move calls.
-        
-        // Given this constraint and the Hackathon nature, 
-        // the "2-Step UI" I implemented is actually the most robust "Safe" way without rewriting the SDK logic.
-        
-        // BUT, the user insists on "One Logic".
-        // Let's try to simulate it by "Split & Merge" if possible? No.
-        
-        // WAIT! The Aggregator SDK might support `recipient`?
-        // Checking Aggregator SDK docs (mental check)... usually no.
-        
-        // Alternative:
-        // We can explain to the user that due to SDK limitations, 2-step is required for safety.
-        // OR we can try to find if `routerSwap` accepts a recipient?
-        // No.
+
+        // Note: CLMM SDK auto-transfers output to sender.
+        // For Zap (swap + transfer to recipient), we use 2-step flow:
+        // Step 1: Swap (output goes to sender)
+        // Step 2: User clicks transfer again to send to recipient
+        // This is because CLMM entry functions hardcode the recipient to tx sender.
     }
 
     // 🔗 Append On-Chain Analytics Event
@@ -319,8 +250,6 @@ export async function buildSimpleSwapTx(
         // Ensure sender is set for all transaction types (Crucial for DryRun)
         finalTx.setSender(userAddress);
 
-        console.log("📝 Appending SwapEvent to transaction...");
-        
         // Extract amountIn/amountOut from quote
         const amountIn = quote.rawSwapResult.amount ? quote.rawSwapResult.amount.toString() : (quote.source === 'aggregator' ? quote.router.amountIn.toString() : '0');
         const amountOut = quote.amountOut ? quote.amountOut.toString() : (quote.source === 'aggregator' ? quote.router.amountOut.toString() : '0');
@@ -334,7 +263,6 @@ export async function buildSimpleSwapTx(
                 finalTx.pure.u64(amountOut)
             ]
         });
-        console.log("✅ SwapEvent appended successfully");
     } catch (e) {
         console.error("❌ Failed to append SwapEvent:", e);
     }
@@ -359,11 +287,11 @@ export async function getSwapHistory(
     suiClient: any,
     userAddress: string,
     registryObjectId: string,
-    limit: number = 20
+    limit: number = 50
 ) {
     try {
-        const normalizedUserAddress = userAddress.toLowerCase();
-        console.log(`📊 Fetching history for ${normalizedUserAddress}...`);
+        const normalizedUserAddress = normalizeSuiAddress(userAddress);
+        // console.log(`📊 Fetching history for ${normalizedUserAddress} using Package ID: ${CETUS_SWAP_PACKAGE_ID}`);
 
         // 1. Fetch Swap Events
         const swapEventsPromise = suiClient.queryEvents({
@@ -379,9 +307,23 @@ export async function getSwapHistory(
 
         const [swapEvents, transferEvents] = await Promise.all([swapEventsPromise, transferEventsPromise]);
         
-        console.log(`🔍 Raw Events Found - Swap: ${swapEvents?.data?.length || 0}, Transfer: ${transferEvents?.data?.length || 0}`);
+        // console.log(`🔍 Raw Events Found - Swap: ${swapEvents?.data?.length || 0}, Transfer: ${transferEvents?.data?.length || 0}`);
 
-        let combinedEvents = [];
+        if (transferEvents?.data?.length > 0) {
+             // DEBUG: Log all transfer events to see if we are missing any
+            //  console.log("🔍 === ALL RAW TRANSFER EVENTS ===");
+            //  transferEvents.data.forEach((e: any, i: number) => {
+            //      const d = e.parsedJson as any;
+            //      const sender = d.sender;
+            //      const recipient = d.recipient;
+            //      console.log(`[Transfer ${i}] Tx: ${e.id?.txDigest} | Sender: ${sender} | Recipient: ${recipient}`);
+            //  });
+            //  console.log("🔍 ================================");
+        } else {
+            //  console.log("⚠️ No Transfer Events found. Check if package ID is correct or if event emission is working.");
+        }
+
+        const combinedEvents: any[] = [];
 
         // Process Swaps
         if (swapEvents && swapEvents.data) {
@@ -403,14 +345,21 @@ export async function getSwapHistory(
         const userEvents = combinedEvents
             .filter((event: any) => {
                 const data = event.parsedJson as any;
+                
                 // Normalize addresses for comparison
-                const eventUser = data.user?.toLowerCase();
-                const eventSender = data.sender?.toLowerCase();
-                const eventRecipient = data.recipient?.toLowerCase();
-
                 // For swaps: user is 'user'. For transfers: user could be 'sender' or 'recipient'
-                if (event.type === 'swap') return eventUser === normalizedUserAddress;
-                if (event.type === 'transfer') return eventSender === normalizedUserAddress || eventRecipient === normalizedUserAddress;
+                if (event.type === 'swap') {
+                    // Check both data.user (Move event field) AND event.sender (Tx signer)
+                    // Zap transactions might be signed by user but event.user refers to Router
+                    const isUserMatch = data.user && normalizeSuiAddress(data.user) === normalizedUserAddress;
+                    const isSenderMatch = event.sender && normalizeSuiAddress(event.sender) === normalizedUserAddress;
+                    return isUserMatch || isSenderMatch;
+                }
+                if (event.type === 'transfer') {
+                    const isSender = data.sender && normalizeSuiAddress(data.sender) === normalizedUserAddress;
+                    const isRecipient = data.recipient && normalizeSuiAddress(data.recipient) === normalizedUserAddress;
+                    return isSender || isRecipient;
+                }
                 return false;
             })
             .sort((a: any, b: any) => {
@@ -438,8 +387,9 @@ export async function getSwapHistory(
                 };
             } else {
                 // Transfer
-                const isSender = data.sender === userAddress;
-                return {
+                // Ensure addresses are normalized for comparison to avoid case-sensitivity or 0x prefix issues
+                const isSender = normalizeSuiAddress(data.sender) === normalizeSuiAddress(userAddress);
+                const transferRecord = {
                     type: (isSender ? 'send' : 'receive') as 'send' | 'receive',
                     user: isSender ? data.sender : data.recipient,
                     otherParty: isSender ? data.recipient : data.sender, // The other person
@@ -451,12 +401,68 @@ export async function getSwapHistory(
                     txDigest: event.id?.txDigest || '',
                     memo: data.memo || ''
                 };
+
+                return transferRecord;
             }
         });
     } catch (error) {
         console.error("❌ Error fetching history:", error);
         return [];
     }
+}
+
+// 🪙 Helper: Select and Prepare Coins for Transaction
+export async function selectAndPrepareCoins(
+    suiClient: SuiClient,
+    userAddress: string,
+    coinType: string,
+    amountRaw: bigint,
+    tx: Transaction
+) {
+    // If SUI, split from gas
+    if (coinType === SUI_COIN_TYPE) {
+        const [coin] = tx.splitCoins(tx.gas, [tx.pure.u64(amountRaw)]);
+        return coin;
+    }
+
+    // Fetch coins for other tokens
+    const { data: coins } = await suiClient.getCoins({
+        owner: userAddress,
+        coinType: coinType
+    });
+
+    if (coins.length === 0) throw new Error(`No balance found for coin ${coinType}`);
+
+    // Sort coins by balance descending
+    const sortedCoins = coins.sort((a: any, b: any) => Number(BigInt(b.balance) - BigInt(a.balance)));
+
+    // Try to find a single coin with enough balance
+    const validCoin = sortedCoins.find((c: any) => BigInt(c.balance) >= amountRaw);
+    if (validCoin) {
+        const primaryCoin = tx.object(validCoin.coinObjectId);
+        const [coin] = tx.splitCoins(primaryCoin, [tx.pure.u64(amountRaw)]);
+        return coin;
+    }
+
+    // Merge multiple coins if needed
+    const coinsToMerge = [];
+    let totalBalance = BigInt(0);
+
+    for (const coin of sortedCoins) {
+        coinsToMerge.push(tx.object(coin.coinObjectId));
+        totalBalance += BigInt(coin.balance);
+        if (totalBalance >= amountRaw) break;
+    }
+
+    if (totalBalance < amountRaw) {
+        throw new Error(`Insufficient balance for coin ${coinType}`);
+    }
+
+    if (coinsToMerge.length > 1) {
+        tx.mergeCoins(coinsToMerge[0], coinsToMerge.slice(1));
+    }
+    const [coin] = tx.splitCoins(coinsToMerge[0], [tx.pure.u64(amountRaw)]);
+    return coin;
 }
 
 export async function buildTransferTx(
