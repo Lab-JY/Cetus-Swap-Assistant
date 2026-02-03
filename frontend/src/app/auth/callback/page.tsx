@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation';
 import { jwtDecode } from 'jwt-decode';
 import { RANDOMNESS_SESSION_KEY, MAX_EPOCH_KEY } from '@/utils/zklogin';
 import { secureStorage } from '@/utils/storage';
-import { jwtToAddress } from '@mysten/zklogin';
+import { jwtToAddress } from '@mysten/sui/zklogin';
 
 export default function AuthCallback() {
   const router = useRouter();

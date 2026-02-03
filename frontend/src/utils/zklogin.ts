@@ -1,5 +1,5 @@
 import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
-import { generateNonce, generateRandomness, getZkLoginSignature } from '@mysten/zklogin';
+import { generateNonce, generateRandomness, getZkLoginSignature } from '@mysten/sui/zklogin';
 import { Transaction } from '@mysten/sui/transactions';
 import { SuiClient } from '@mysten/sui/client';
 import { secureStorage } from './storage';
