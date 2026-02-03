@@ -10,6 +10,13 @@ import { SUI_NETWORK } from './config';
 export const GOOGLE_CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || '25769832374-famec85nbqn6hskd94n6d846g4869051.apps.googleusercontent.com';
 export const REDIRECT_URI = `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/auth/callback`;
 
+if (typeof window !== 'undefined') {
+    // eslint-disable-next-line no-console
+    console.info('[zkLogin] GOOGLE_CLIENT_ID =', GOOGLE_CLIENT_ID);
+    // eslint-disable-next-line no-console
+    console.info('[zkLogin] REDIRECT_URI =', REDIRECT_URI);
+}
+
 // Official Sui Proving Service endpoint
 export const PROVING_SERVICE_URL = 'https://prover.mystenlabs.com/v1';
 
