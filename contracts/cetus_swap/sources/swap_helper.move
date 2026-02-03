@@ -38,6 +38,31 @@ public struct SwapRegistry has key {
     total_volume: u64,
 }
 
+/// Swap receipt as an on-chain object (shareable & indexable)
+public struct SwapReceipt has key, store {
+    id: sui::object::UID,
+    user: address,
+    from_coin: ascii::String,
+    to_coin: ascii::String,
+    amount_in: u64,
+    amount_out: u64,
+    route: ascii::String,
+    timestamp: u64,
+}
+
+/// Zap receipt (swap + send) as an on-chain object
+public struct ZapReceipt has key, store {
+    id: sui::object::UID,
+    user: address,
+    recipient: address,
+    from_coin: ascii::String,
+    to_coin: ascii::String,
+    amount_in: u64,
+    amount_out: u64,
+    route: ascii::String,
+    timestamp: u64,
+}
+
 /// Event emitted when a swap is completed
 public struct SwapEvent has copy, drop {
     user: address,
@@ -72,8 +97,33 @@ public struct TransferEvent has copy, drop {
     timestamp: u64,
 }
 
+/// Event emitted when a SwapReceipt is minted
+public struct SwapReceiptMinted has copy, drop {
+    receipt_id: object::ID,
+    user: address,
+    from_coin: ascii::String,
+    to_coin: ascii::String,
+    amount_in: u64,
+    amount_out: u64,
+    route: ascii::String,
+    timestamp: u64,
+}
+
+/// Event emitted when a ZapReceipt is minted
+public struct ZapReceiptMinted has copy, drop {
+    receipt_id: object::ID,
+    user: address,
+    recipient: address,
+    from_coin: ascii::String,
+    to_coin: ascii::String,
+    amount_in: u64,
+    amount_out: u64,
+    route: ascii::String,
+    timestamp: u64,
+}
+
 /// Initialize the swap registry (called once)
-public entry fun init_registry(ctx: &mut sui::tx_context::TxContext) {
+public fun init_registry(ctx: &mut sui::tx_context::TxContext) {
     let admin_cap = AdminCap {
         id: object::new(ctx),
     };
@@ -96,7 +146,7 @@ public entry fun init_registry(ctx: &mut sui::tx_context::TxContext) {
 }
 
 /// Execute a swap and record it on-chain
-public entry fun execute_swap<T>(
+public fun execute_swap<T>(
     coin: Coin<T>,
     recipient: address,
     amount_out: u64,
@@ -174,7 +224,7 @@ public entry fun execute_swap<T>(
 }
 
 /// Transfer coin with a memo attached
-public entry fun transfer_coin_with_memo<T>(
+public fun transfer_coin_with_memo<T>(
     coin: Coin<T>,
     recipient: address,
     memo: ascii::String,
@@ -199,6 +249,85 @@ public entry fun transfer_coin_with_memo<T>(
     transfer::public_transfer(coin, recipient);
 }
 
+/// Mint a SwapReceipt object for on-chain indexing
+public fun mint_swap_receipt(
+    from_coin: ascii::String,
+    to_coin: ascii::String,
+    amount_in: u64,
+    amount_out: u64,
+    route: ascii::String,
+    ctx: &mut sui::tx_context::TxContext
+): SwapReceipt {
+    let sender = tx_context::sender(ctx);
+    let timestamp = tx_context::epoch(ctx);
+
+    let receipt = SwapReceipt {
+        id: object::new(ctx),
+        user: sender,
+        from_coin,
+        to_coin,
+        amount_in,
+        amount_out,
+        route,
+        timestamp,
+    };
+
+    let receipt_id = object::id(&receipt);
+    event::emit(SwapReceiptMinted {
+        receipt_id,
+        user: sender,
+        from_coin,
+        to_coin,
+        amount_in,
+        amount_out,
+        route,
+        timestamp,
+    });
+
+    receipt
+}
+
+/// Mint a ZapReceipt object for on-chain indexing
+public fun mint_zap_receipt(
+    from_coin: ascii::String,
+    to_coin: ascii::String,
+    amount_in: u64,
+    amount_out: u64,
+    route: ascii::String,
+    recipient: address,
+    ctx: &mut sui::tx_context::TxContext
+): ZapReceipt {
+    let sender = tx_context::sender(ctx);
+    let timestamp = tx_context::epoch(ctx);
+
+    let receipt = ZapReceipt {
+        id: object::new(ctx),
+        user: sender,
+        recipient,
+        from_coin,
+        to_coin,
+        amount_in,
+        amount_out,
+        route,
+        timestamp,
+    };
+
+    let receipt_id = object::id(&receipt);
+    event::emit(ZapReceiptMinted {
+        receipt_id,
+        user: sender,
+        recipient,
+        from_coin,
+        to_coin,
+        amount_in,
+        amount_out,
+        route,
+        timestamp,
+    });
+
+    receipt
+}
+
 /// Get user statistics
 public fun get_user_stats(
     registry: &SwapRegistry,
@@ -213,7 +342,7 @@ public fun get_user_stats(
 }
 
 /// Record a swap event (called via PTB composition)
-public entry fun record_swap_event(
+public fun record_swap_event(
     from_coin: ascii::String,
     to_coin: ascii::String,
     amount_in: u64,

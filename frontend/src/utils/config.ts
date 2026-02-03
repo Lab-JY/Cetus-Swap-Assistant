@@ -1,17 +1,15 @@
 
-// 🛠️ Global Configuration for Cetus Swap
+// 🛠️ Global Configuration for Cetus RoutePay
 // Centralized constants to avoid duplication and ensure consistency across the app.
 
 // 🟢 Smart Contract Deployment Details
-export const CETUS_SWAP_PACKAGE_ID = process.env.NEXT_PUBLIC_CETUS_SWAP_PACKAGE_ID || '0x7df8638602241e18b4dd8ba774c3d204cf7785f14050b14d9729adc030c28a4a';
+export const CETUS_SWAP_PACKAGE_ID = process.env.NEXT_PUBLIC_CETUS_SWAP_PACKAGE_ID || '0x622bf94c8095556221e3798242e7939c9ec6a5cdc59f90ee148dd0cc72e13480';
 
 // 🌐 Network Configuration
 // Default to Mainnet unless NEXT_PUBLIC_SUI_NETWORK is set to 'testnet'
 export const SUI_NETWORK = (process.env.NEXT_PUBLIC_SUI_NETWORK === 'testnet') ? 'testnet' : 'mainnet';
-
-export const SUI_EXPLORER_URL = SUI_NETWORK === 'mainnet'
-    ? 'https://suiscan.xyz/mainnet'
-    : 'https://suiscan.xyz/testnet';
+export const CETUS_PARTNER_ID = (process.env.NEXT_PUBLIC_CETUS_PARTNER_ID || '').trim();
+export const ENABLE_RECEIPTS = process.env.NEXT_PUBLIC_ENABLE_RECEIPTS === 'true';
 
 // 💰 Token Configuration
 const MAINNET_TOKENS = {

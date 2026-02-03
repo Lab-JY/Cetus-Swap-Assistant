@@ -10,6 +10,8 @@ export const ERROR_MAPPING: Record<string, string> = {
     'Execution failed': '执行失败',
     'Network error': '网络错误，请检查连接',
     'Failed to fetch quote': '获取报价失败',
+    'Dry run failed': '交易预检失败',
+    'Preflight failed': '交易预检失败',
     'JWT not found': '未找到登录凭证 (JWT)',
     'Transfer Failed': '转账失败',
     'zkLogin transaction failed': 'zkLogin 交易失败',

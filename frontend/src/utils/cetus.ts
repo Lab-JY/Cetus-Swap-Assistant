@@ -3,11 +3,11 @@ import { AggregatorClient, Env } from "@cetusprotocol/aggregator-sdk";
 import { initCetusSDK } from "@cetusprotocol/cetus-sui-clmm-sdk";
 import { Transaction } from "@mysten/sui/transactions";
 import { SuiClient } from "@mysten/sui/client";
-import { normalizeSuiAddress } from "@mysten/sui/utils";
+import { normalizeSuiAddress, isValidSuiAddress } from "@mysten/sui/utils";
 import BN from "bn.js";
-import { TOKENS, SUI_NETWORK, POOL_IDS, CETUS_SWAP_PACKAGE_ID } from "./config";
+import { TOKENS, SUI_NETWORK, POOL_IDS, CETUS_SWAP_PACKAGE_ID, CETUS_PARTNER_ID, ENABLE_RECEIPTS } from "./config";
 
-export { SUI_NETWORK }; // Re-export for frontend use
+export { SUI_NETWORK, CETUS_PARTNER_ID, ENABLE_RECEIPTS }; // Re-export for frontend use
 
 // 🌟 Initialize Cetus Aggregator SDK
 const aggregator = new AggregatorClient({
@@ -29,6 +29,215 @@ export const CETUS_COIN_TYPE = TOKENS.CETUS;
 export const USDC_COIN_TYPE = TOKENS.USDC; 
 export const WUSDC_COIN_TYPE = TOKENS.wUSDC; 
 
+const COIN_DECIMALS: Record<string, number> = {
+    [TOKENS.SUI]: 9,
+    [TOKENS.USDC]: 6,
+    [TOKENS.CETUS]: 9,
+    [TOKENS.wUSDC]: 6,
+    ...(TOKENS as any).MEME ? { [(TOKENS as any).MEME]: 9 } : {},
+    ...(TOKENS as any).IDOL_APPLE ? { [(TOKENS as any).IDOL_APPLE]: 9 } : {},
+    ...(TOKENS as any).IDOL_DGRAN ? { [(TOKENS as any).IDOL_DGRAN]: 9 } : {},
+};
+
+export const getCoinDecimals = (coinType: string) => {
+    if (COIN_DECIMALS[coinType]) return COIN_DECIMALS[coinType];
+    if (coinType.includes('::usdc::USDC') || coinType.includes('::coin::COIN')) return 6;
+    return 9;
+};
+
+export const formatCoinAmount = (coinType: string, amount: bigint | string | number, precision: number = 6) => {
+    const decimals = getCoinDecimals(coinType);
+    const base = new BN(10).pow(new BN(decimals));
+    const bn = new BN(amount.toString());
+    const whole = bn.div(base).toString();
+    const fracRaw = bn.mod(base).toString().padStart(decimals, '0');
+    const frac = fracRaw.slice(0, precision).replace(/0+$/, '');
+    return frac ? `${whole}.${frac}` : whole;
+};
+
+type RouteStep = {
+    from: string;
+    to: string;
+    fromSymbol: string;
+    toSymbol: string;
+    provider: string;
+    feeRate?: string | number;
+};
+
+type RouteDetails = {
+    type: 'aggregator' | 'clmm';
+    hops: number;
+    providers: string[];
+    steps: RouteStep[];
+    pathText: string;
+};
+
+type QuoteComparison = {
+    directOut: string;
+    aggregatorOut: string;
+    savingsAbs: string;
+    savingsPct: number;
+    better: 'aggregator' | 'clmm' | 'equal';
+};
+
+type QuoteMeta = {
+    aggregatorLatencyMs?: number;
+    clmmLatencyMs?: number;
+    fallbackFrom?: 'aggregator' | 'clmm';
+    fallbackReason?: string;
+};
+
+export type PartnerInfo = {
+    enabled: boolean;
+    reason?: string;
+    partnerId?: string;
+};
+
+const isCetusProvider = (provider: string) => provider.toLowerCase().includes('cetus');
+
+export const getCetusPartnerInfo = (
+    quote: any | null,
+    isZap: boolean,
+    recipient: string
+): PartnerInfo => {
+    if (!isZap) return { enabled: false, reason: 'Swap mode' };
+    if (!recipient || !isValidSuiAddress(recipient)) return { enabled: false, reason: 'Recipient not set' };
+    if (!CETUS_PARTNER_ID) return { enabled: false, reason: 'Partner not configured' };
+    if (!quote) return { enabled: false, reason: 'No quote' };
+    if (quote.source !== 'aggregator') return { enabled: false, reason: 'CLMM fallback' };
+
+    const steps = quote.selectedRoute?.pathSteps || quote.routeDetails?.steps || [];
+    if (!steps.length) return { enabled: false, reason: 'Route unavailable' };
+
+    const providers = Array.from(
+        new Set(steps.map((s: any) => String(s.provider || '')).filter(Boolean))
+    );
+    const hasNonCetus = providers.some((p) => !isCetusProvider(p));
+    if (hasNonCetus) return { enabled: false, reason: 'External route' };
+
+    return { enabled: true, partnerId: CETUS_PARTNER_ID };
+};
+
+export const getPartnerRefFeeAmounts = async (partnerId: string = CETUS_PARTNER_ID) => {
+    if (!partnerId) return [];
+    return cetusClmm.Pool.getPartnerRefFeeAmount(partnerId, true);
+};
+
+const toBn = (value: string | number | BN) => value instanceof BN ? value : new BN(value);
+
+const buildRouteDetails = (source: 'aggregator' | 'clmm', steps: RouteStep[]): RouteDetails => {
+    const providers = Array.from(new Set(steps.map((s) => s.provider)));
+    const pathText = steps.map((s) => `${s.fromSymbol}→${s.toSymbol}`).join(' | ');
+    return {
+        type: source,
+        hops: steps.length,
+        providers,
+        steps,
+        pathText,
+    };
+};
+
+const computeComparison = (aggregatorOut?: BN | null, directOut?: BN | null): QuoteComparison | null => {
+    if (!aggregatorOut || !directOut) return null;
+    if (directOut.isZero()) return null;
+
+    const diff = aggregatorOut.sub(directOut);
+    const savingsPct = diff.mul(new BN(10000)).div(directOut).toNumber() / 100;
+    let better: QuoteComparison['better'] = 'equal';
+    if (diff.gt(new BN(0))) better = 'aggregator';
+    if (diff.lt(new BN(0))) better = 'clmm';
+
+    return {
+        directOut: directOut.toString(),
+        aggregatorOut: aggregatorOut.toString(),
+        savingsAbs: diff.abs().toString(),
+        savingsPct: Math.abs(savingsPct),
+        better,
+    };
+};
+
+const toAsciiLabel = (value: string) => {
+    const replaced = value.replace(/→/g, '->');
+    return replaced.replace(/[^\x20-\x7E]/g, '');
+};
+
+const getPoolAddressForPair = (fromCoinType: string, toCoinType: string): string => {
+    const network = SUI_NETWORK === 'mainnet' ? 'mainnet' : 'testnet';
+    const pools = POOL_IDS[network] as any;
+
+    const pairKey = `${fromCoinType}-${toCoinType}`;
+    const reversePairKey = `${toCoinType}-${fromCoinType}`;
+
+    let POOL_MAP: Record<string, string> = {};
+
+    if (network === 'mainnet') {
+        POOL_MAP = {
+            [`${TOKENS.SUI}-${TOKENS.USDC}`]: pools.SUI_USDC,
+            [`${TOKENS.SUI}-${TOKENS.CETUS}`]: pools.SUI_CETUS,
+            [`${TOKENS.USDC}-${TOKENS.CETUS}`]: pools.USDC_CETUS,
+        };
+    } else {
+        POOL_MAP = {
+            [`${TOKENS.SUI}-${(TOKENS as any).MEME}`]: pools.SUI_MEME,
+            [`${TOKENS.SUI}-${(TOKENS as any).IDOL_APPLE}`]: pools.SUI_IDOL_APPLE,
+            [`${TOKENS.SUI}-${(TOKENS as any).IDOL_DGRAN}`]: pools.SUI_IDOL_DGRAN,
+        };
+    }
+
+    return POOL_MAP[pairKey] || POOL_MAP[reversePairKey] || '';
+};
+
+const getDirectPoolQuote = async (
+    fromCoinType: string,
+    toCoinType: string,
+    amount: BN,
+    byAmountIn: boolean,
+): Promise<{
+    amountOut: BN;
+    estimatedFee: number;
+    poolAddress: string;
+    a2b: boolean;
+    rawSwapResult: any;
+    routeDetails: RouteDetails;
+} | null> => {
+    const poolAddress = getPoolAddressForPair(fromCoinType, toCoinType);
+    if (!poolAddress) return null;
+
+    const pool = await cetusClmm.Pool.getPool(poolAddress);
+    const a2b = fromCoinType === pool.coinTypeA;
+
+    const res = await cetusClmm.Swap.preswap({
+        pool: pool,
+        currentSqrtPrice: pool.current_sqrt_price,
+        decimalsA: getCoinDecimals(pool.coinTypeA),
+        decimalsB: getCoinDecimals(pool.coinTypeB),
+        a2b: a2b,
+        byAmountIn: byAmountIn,
+        amount: amount.toString(),
+        coinTypeA: pool.coinTypeA,
+        coinTypeB: pool.coinTypeB
+    });
+
+    if (!res) return null;
+
+    const steps: RouteStep[] = [{
+        from: fromCoinType,
+        to: toCoinType,
+        fromSymbol: getTokenSymbol(fromCoinType),
+        toSymbol: getTokenSymbol(toCoinType),
+        provider: 'Cetus CLMM',
+    }];
+
+    return {
+        amountOut: new BN(res.estimatedAmountOut),
+        estimatedFee: res.estimatedFeeAmount,
+        poolAddress,
+        a2b,
+        rawSwapResult: res,
+        routeDetails: buildRouteDetails('clmm', steps),
+    };
+};
+
 export async function getSwapQuote(
     fromCoinType: string,
     toCoinType: string,
@@ -37,147 +246,135 @@ export async function getSwapQuote(
     byAmountIn: boolean = true
 ) {
     const amount = new BN(amountIn);
+    const meta: QuoteMeta = {};
 
     // Set sender address for CLMM SDK
     if (userAddress) {
         cetusClmm.senderAddress = userAddress;
     }
 
+    let aggregatorError: string | undefined;
+    let aggregatorQuote: any | null = null;
+    let directQuote: Awaited<ReturnType<typeof getDirectPoolQuote>> | null = null;
+
+    const aggStart = Date.now();
     try {
-        // 1️⃣ Try Aggregator First (Mainnet & Testnet)
-        // Note: Testnet only supports limited providers (Cetus, DeepBook)
-        
         const routerData = await aggregator.findRouters({
             from: fromCoinType,
             target: toCoinType,
             amount: amount,
             byAmountIn: byAmountIn,
         });
+        meta.aggregatorLatencyMs = Date.now() - aggStart;
 
         if (routerData && routerData.paths && routerData.paths.length > 0) {
-            // RouterDataV3 returns paths as a flat array, we need to group them into routes
-            // For now, treat each path as a separate route option
             const routes = routerData.paths.map((path: any, idx: number) => {
+                const pathSteps = [{
+                    from: path.from,
+                    to: path.target,
+                    provider: path.provider,
+                    feeRate: path.feeRate,
+                    amountIn: path.amountIn,
+                    amountOut: path.amountOut
+                }];
+
                 return {
                     id: idx,
                     amountOut: new BN(path.amountOut),
                     estimatedFee: 0,
                     router: { path: [path] },
                     source: 'aggregator',
-                    pathSteps: [{
-                        from: path.from,
-                        to: path.target,
-                        provider: path.provider,
-                        feeRate: path.feeRate,
-                        amountIn: path.amountIn,
-                        amountOut: path.amountOut
-                    }],
-                    hopCount: 1,
+                    pathSteps,
+                    hopCount: pathSteps.length,
                     rawSwapResult: { path: [path] }
                 };
             });
 
-            return {
-                amountOut: routerData.amountOut,
+            const routeSteps: RouteStep[] = routerData.paths.map((path: any) => ({
+                from: path.from,
+                to: path.target,
+                fromSymbol: getTokenSymbol(path.from),
+                toSymbol: getTokenSymbol(path.target),
+                provider: path.provider || 'Cetus Aggregator',
+                feeRate: path.feeRate,
+            }));
+
+            const paths = routerData.paths.map((path: any, idx: number) => ({
+                label: `${getTokenSymbol(path.from)}→${getTokenSymbol(path.target)} (${path.provider || 'Cetus'})`,
+                steps: [path],
+                id: idx,
+            }));
+
+            const normalizedAmountOut = typeof routerData.amountOut?.toString === 'function'
+                ? routerData.amountOut.toString()
+                : routerData.amountOut;
+
+            aggregatorQuote = {
+                amountOut: normalizedAmountOut,
                 estimatedFee: 0,
                 router: routerData,
                 source: 'aggregator',
                 routes: routes,
+                paths,
                 selectedRouteId: 0, // Default to best route
                 rawSwapResult: routerData,
-                fullRouterData: routerData // Store full routerData for SDK
+                fullRouterData: routerData,
+                routeDetails: buildRouteDetails('aggregator', routeSteps),
             };
+        } else {
+            aggregatorError = 'No routes found';
         }
     } catch (error) {
+        meta.aggregatorLatencyMs = Date.now() - aggStart;
+        aggregatorError = error instanceof Error ? error.message : String(error);
         console.warn("⚠️ Aggregator failed, trying direct pool fallback...", error);
     }
 
-    // 2️⃣ Fallback to Direct Pool (CLMM)
+    const clmmStart = Date.now();
     try {
-        // Identify Pool ID based on token pair
-        let poolAddress = '';
-        const network = SUI_NETWORK === 'mainnet' ? 'mainnet' : 'testnet';
-        const pools = POOL_IDS[network] as any;
-
-        const pairKey = `${fromCoinType}-${toCoinType}`;
-        const reversePairKey = `${toCoinType}-${fromCoinType}`;
-        
-        let POOL_MAP: Record<string, string> = {};
-
-        if (network === 'mainnet') {
-             POOL_MAP = {
-                [`${TOKENS.SUI}-${TOKENS.USDC}`]: pools.SUI_USDC,
-                [`${TOKENS.SUI}-${TOKENS.CETUS}`]: pools.SUI_CETUS,
-                [`${TOKENS.USDC}-${TOKENS.CETUS}`]: pools.USDC_CETUS,
-             };
-        } else {
-             // Testnet
-             POOL_MAP = {
-                [`${TOKENS.SUI}-${(TOKENS as any).MEME}`]: pools.SUI_MEME,
-                [`${TOKENS.SUI}-${(TOKENS as any).IDOL_APPLE}`]: pools.SUI_IDOL_APPLE,
-                [`${TOKENS.SUI}-${(TOKENS as any).IDOL_DGRAN}`]: pools.SUI_IDOL_DGRAN,
-             };
-        }
-
-        // Check both directions
-        poolAddress = POOL_MAP[pairKey] || POOL_MAP[reversePairKey] || '';
-
-        if (!poolAddress) {
-            const errorMsg = "This token pair is not supported. Please select a different pair.";
-            console.error("❌ No direct pool configured for this pair.");
-            return {
-                error: true,
-                errorMessage: errorMsg,
-                source: 'error'
-            };
-        }
-
-        const pool = await cetusClmm.Pool.getPool(poolAddress);
-        // Determine a2b based on actual pool structure
-        const a2b = fromCoinType === pool.coinTypeA;
-
-        // Use preswap which handles tick fetching or simple estimation
-        const res = await cetusClmm.Swap.preswap({
-            pool: pool,
-            currentSqrtPrice: pool.current_sqrt_price,
-            decimalsA: 9,
-            decimalsB: 6,
-            a2b: a2b,
-            byAmountIn: byAmountIn,
-            amount: amount.toString(),
-            coinTypeA: pool.coinTypeA,
-            coinTypeB: pool.coinTypeB
-        });
-
-        if (!res) {
-            const errorMsg = "Failed to get quote for this pair. Please try again.";
-            return {
-                error: true,
-                errorMessage: errorMsg,
-                source: 'error'
-            };
-        }
-
-        return {
-            amountOut: new BN(res.estimatedAmountOut),
-            estimatedFee: res.estimatedFeeAmount,
-            router: null,
-            source: 'clmm',
-            poolAddress: poolAddress,
-            a2b: a2b,
-            paths: [{ label: 'Direct Pool', steps: [] }],
-            rawSwapResult: res
-        };
-
+        directQuote = await getDirectPoolQuote(fromCoinType, toCoinType, amount, byAmountIn);
+        meta.clmmLatencyMs = Date.now() - clmmStart;
     } catch (error) {
-        const errorMsg = error instanceof Error ? error.message : "Failed to get quote. Please try again.";
-        console.error("❌ Error finding direct quote:", error);
+        meta.clmmLatencyMs = Date.now() - clmmStart;
+        console.warn("⚠️ Direct pool quote failed...", error);
+    }
+
+    if (aggregatorQuote) {
+        const comparison = computeComparison(toBn(aggregatorQuote.amountOut), directQuote?.amountOut);
         return {
-            error: true,
-            errorMessage: errorMsg,
-            source: 'error'
+            ...aggregatorQuote,
+            comparison,
+            meta,
         };
     }
+
+    if (directQuote) {
+        meta.fallbackFrom = 'aggregator';
+        meta.fallbackReason = aggregatorError || 'Aggregator unavailable';
+        return {
+            amountOut: directQuote.amountOut.toString(),
+            estimatedFee: directQuote.estimatedFee,
+            router: null,
+            source: 'clmm',
+            poolAddress: directQuote.poolAddress,
+            a2b: directQuote.a2b,
+            paths: [{ label: 'Direct Pool', steps: [] }],
+            rawSwapResult: directQuote.rawSwapResult,
+            routeDetails: directQuote.routeDetails,
+            comparison: null,
+            meta,
+        };
+    }
+
+    const aggregatorReason = aggregatorError || 'Unavailable';
+    const errorMsg = `No available route (Aggregator: ${aggregatorReason}; Direct pool: not configured).`;
+    console.error("❌ Error finding quote:", errorMsg);
+    return {
+        error: true,
+        errorMessage: errorMsg,
+        source: 'error',
+        meta,
+    };
 }
 
 export async function buildSimpleSwapTx(
@@ -197,16 +394,20 @@ export async function buildSimpleSwapTx(
 
     if (quote.source === 'aggregator') {
         if (!tx) throw new Error("Transaction object required for Aggregator mode");
-        const { router } = quote;
+        const router = quote.selectedRoute?.router
+            ? { ...quote.router, paths: quote.selectedRoute.router.path }
+            : quote.router;
         // Set sender address on transaction for Aggregator SDK
         tx.setSender(userAddress);
         
         // Use routerSwap which appends commands to tx.
+        const partnerInfo = getCetusPartnerInfo(quote, isZap, recipient);
         const targetCoin = await aggregator.routerSwap({
             router: router,
             txb: tx as any,
             inputCoin: inputCoin,
             slippage: slippage,
+            partner: partnerInfo.enabled ? partnerInfo.partnerId : undefined,
         });
 
         if (isZap && recipient) {
@@ -251,8 +452,11 @@ export async function buildSimpleSwapTx(
         finalTx.setSender(userAddress);
 
         // Extract amountIn/amountOut from quote
-        const amountIn = quote.rawSwapResult.amount ? quote.rawSwapResult.amount.toString() : (quote.source === 'aggregator' ? quote.router.amountIn.toString() : '0');
-        const amountOut = quote.amountOut ? quote.amountOut.toString() : (quote.source === 'aggregator' ? quote.router.amountOut.toString() : '0');
+        const amountIn = quote.rawSwapResult?.amount
+            ? quote.rawSwapResult.amount.toString()
+            : (quote.source === 'aggregator' ? quote.router.amountIn.toString() : '0');
+        const selectedAmountOut = quote.selectedRoute?.amountOut || quote.amountOut;
+        const amountOut = selectedAmountOut ? selectedAmountOut.toString() : (quote.source === 'aggregator' ? quote.router.amountOut.toString() : '0');
 
         finalTx.moveCall({
             target: `${CETUS_SWAP_PACKAGE_ID}::swap_helper::record_swap_event`,
@@ -263,6 +467,41 @@ export async function buildSimpleSwapTx(
                 finalTx.pure.u64(amountOut)
             ]
         });
+
+        if (ENABLE_RECEIPTS) {
+            const routeLabelRaw = quote.selectedRoute?.pathSteps?.map((s: any) => `${getTokenSymbol(s.from)}->${getTokenSymbol(s.to)}`).join(' | ')
+                || quote.routeDetails?.pathText
+                || (quote.source === 'aggregator' ? 'Cetus Aggregator' : 'Cetus CLMM');
+            const routeLabel = toAsciiLabel(routeLabelRaw);
+
+            const isAtomicZap = isZap && recipient && quote.source === 'aggregator';
+            if (isAtomicZap) {
+                const [zapReceipt] = finalTx.moveCall({
+                    target: `${CETUS_SWAP_PACKAGE_ID}::swap_helper::mint_zap_receipt`,
+                    arguments: [
+                        finalTx.pure.string(fromCoinType),
+                        finalTx.pure.string(toCoinType),
+                        finalTx.pure.u64(amountIn),
+                        finalTx.pure.u64(amountOut),
+                        finalTx.pure.string(routeLabel),
+                        finalTx.pure.address(recipient)
+                    ]
+                });
+                finalTx.transferObjects([zapReceipt], finalTx.pure.address(userAddress));
+            } else {
+                const [swapReceipt] = finalTx.moveCall({
+                    target: `${CETUS_SWAP_PACKAGE_ID}::swap_helper::mint_swap_receipt`,
+                    arguments: [
+                        finalTx.pure.string(fromCoinType),
+                        finalTx.pure.string(toCoinType),
+                        finalTx.pure.u64(amountIn),
+                        finalTx.pure.u64(amountOut),
+                        finalTx.pure.string(routeLabel),
+                    ]
+                });
+                finalTx.transferObjects([swapReceipt], finalTx.pure.address(userAddress));
+            }
+        }
     } catch (e) {
         console.error("❌ Failed to append SwapEvent:", e);
     }
@@ -481,6 +720,19 @@ export async function buildTransferTx(
             tx.pure.string(memo)
         ]
     });
+}
+
+// Apply a selected route to the quote (aggregator only)
+export function applySelectedRoute(quote: any, selectedRouteId: number) {
+    if (!quote || quote.source !== 'aggregator' || !quote.routes || quote.routes.length === 0) {
+        return quote;
+    }
+    const selectedRoute = quote.routes.find((route: any) => route.id === selectedRouteId) || quote.routes[0];
+    return {
+        ...quote,
+        selectedRoute,
+        amountOut: selectedRoute.amountOut ? selectedRoute.amountOut.toString() : quote.amountOut,
+    };
 }
 
 // Helper to get token symbol from coin type

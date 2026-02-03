@@ -4,7 +4,10 @@ import { useState, useEffect, useCallback } from 'react';
 import { ConnectButton, useCurrentAccount, useSignAndExecuteTransaction, useSuiClient, useSuiClientQuery } from '@mysten/dapp-kit';
 import { Transaction } from '@mysten/sui/transactions';
 import { isValidSuiAddress } from '@mysten/sui/utils';
-import { SUI_COIN_TYPE, USDC_COIN_TYPE, CETUS_COIN_TYPE, WUSDC_COIN_TYPE, getSwapQuote, buildSimpleSwapTx, SUI_NETWORK, buildTransferTx, selectAndPrepareCoins } from '@/utils/cetus';
+import { SUI_COIN_TYPE, USDC_COIN_TYPE, CETUS_COIN_TYPE, WUSDC_COIN_TYPE, buildSimpleSwapTx, SUI_NETWORK, buildTransferTx, selectAndPrepareCoins, applySelectedRoute, ENABLE_RECEIPTS, getCetusPartnerInfo, getPartnerRefFeeAmounts, CETUS_PARTNER_ID, formatCoinAmount, getTokenSymbol } from '@/utils/cetus';
+import { getQuoteWithCache } from '@/utils/quoteService';
+import { preflightTransaction } from '@/utils/preflight';
+import { getDerivedStats, recordTrade } from '@/utils/tradeStats';
 import { executeWithRetry } from '@/utils/retry';
 import { getFriendlyErrorMessage } from '@/utils/errors';
 import TransactionStepper from '@/components/TransactionStepper';
@@ -32,6 +35,29 @@ const TOKENS_LIST = SUI_NETWORK === 'testnet' ? TESTNET_TOKENS : MAINNET_TOKENS;
 
 import { secureStorage } from '@/utils/storage';
 
+type RouteStepDisplay = {
+  fromSymbol: string;
+  toSymbol: string;
+  provider: string;
+  from?: string;
+  to?: string;
+};
+
+type QuoteComparison = {
+  better: 'aggregator' | 'clmm' | 'equal';
+  savingsAbs?: string;
+  savingsPct?: number;
+};
+
+type ActiveQuote = {
+  source: 'aggregator' | 'clmm';
+  comparison?: QuoteComparison;
+  routeDetails?: {
+    providers?: string[];
+    steps?: RouteStepDisplay[];
+  };
+};
+
 // Helper to safely parse decimal string to BigInt
 const parseAmount = (amount: string, decimals: number): bigint => {
   if (!amount) return BigInt(0);
@@ -55,7 +81,7 @@ export default function SwapPage() {
   useEffect(() => {
     // 🔍 Debug Info on Init
     // console.log(`🚀 App Initialized on ${SUI_NETWORK.toUpperCase()}`);
-    // console.log(`📦 Cetus Swap Package ID: ${process.env.NEXT_PUBLIC_CETUS_SWAP_PACKAGE_ID}`);
+    // console.log(`📦 Cetus RoutePay Package ID: ${process.env.NEXT_PUBLIC_CETUS_SWAP_PACKAGE_ID}`);
 
     // Check for zkLogin session
     const addr = secureStorage.getItem<string>('zklogin_address');
@@ -70,6 +96,10 @@ export default function SwapPage() {
       setLoginMethod('wallet');
     }
   }, [account?.address]);
+
+  useEffect(() => {
+    setTradeStats(getDerivedStats());
+  }, []);
 
   const handleGoogleLogin = () => {
     suiClient.getLatestSuiSystemState().then(state => {
@@ -108,6 +138,7 @@ export default function SwapPage() {
   const [swapStatus, setSwapStatus] = useState<'idle' | 'swapping' | 'confirming' | 'success' | 'error'>('idle');
   const [showSuccessModal, setShowSuccessModal] = useState(false);
   const [lastTxDigest, setLastTxDigest] = useState('');
+  const [lastReceiptId, setLastReceiptId] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState('');
   const [txWaitMessage, setTxWaitMessage] = useState('');
   const [historyRefreshTrigger, setHistoryRefreshTrigger] = useState(0);
@@ -118,6 +149,11 @@ export default function SwapPage() {
       desc: 'Your transaction has been processed successfully on the Sui Network.',
       btnText: 'Close'
   });
+  const [tradeStats, setTradeStats] = useState<ReturnType<typeof getDerivedStats> | null>(null);
+  const [preflightStatus, setPreflightStatus] = useState<{ ok: boolean; reason?: string; usedUrl?: string; fallback?: boolean } | null>(null);
+  const [partnerRebates, setPartnerRebates] = useState<Array<{ coinAddress: string; balance: bigint }>>([]);
+  const [partnerRebateLoading, setPartnerRebateLoading] = useState(false);
+  const [partnerRebateError, setPartnerRebateError] = useState('');
   
   // 🛡️ Review Modal State
   const [showReviewModal, setShowReviewModal] = useState(false);
@@ -141,6 +177,42 @@ export default function SwapPage() {
     : 0;
 
   const formattedBalance = balanceData ? balance.toFixed(4) : '---';
+
+  type ReceiptEvent = { type?: string; parsedJson?: Record<string, unknown> };
+
+  const extractReceiptIdFromEvents = useCallback((events?: ReceiptEvent[]) => {
+    if (!events) return null;
+    for (const evt of events) {
+      const type = String(evt?.type || '');
+      if (!type.endsWith('::SwapReceiptMinted') && !type.endsWith('::ZapReceiptMinted')) {
+        continue;
+      }
+      const parsed = evt?.parsedJson || {};
+      const candidate =
+        (parsed as Record<string, unknown>).receipt_id ||
+        (parsed as Record<string, unknown>).receiptId ||
+        (parsed as Record<string, unknown>).receiptID;
+      if (typeof candidate === 'string') return candidate;
+      if (candidate && typeof candidate === 'object' && typeof (candidate as { id?: unknown }).id === 'string') {
+        return (candidate as { id: string }).id;
+      }
+    }
+    return null;
+  }, []);
+
+  const fetchReceiptIdFromDigest = useCallback(async (digest: string) => {
+    try {
+      const tx = await suiClient.waitForTransactionBlock({
+        digest,
+        options: { showEvents: true },
+      });
+      const receiptId = extractReceiptIdFromEvents(tx.events as ReceiptEvent[] | undefined);
+      if (receiptId) setLastReceiptId(receiptId);
+    } catch (err) {
+      // ignore receipt lookup errors to avoid blocking success flow
+      console.warn('Failed to load receipt id', err);
+    }
+  }, [suiClient, extractReceiptIdFromEvents]);
 
   const handleMax = () => {
     if (!balanceData || !balanceData.totalBalance) return;
@@ -206,7 +278,13 @@ export default function SwapPage() {
       try {
         // console.log("Fetching quote for:", amountIn, fromToken.symbol, "->", toToken.symbol);
         const rawAmount = parseAmount(amountIn, fromToken.decimals).toString();
-        const routes = await getSwapQuote(fromToken.type, toToken.type, rawAmount, currentAddress);
+        const routes = await getQuoteWithCache({
+          fromCoinType: fromToken.type,
+          toCoinType: toToken.type,
+          amountIn: rawAmount,
+          userAddress: currentAddress,
+          byAmountIn: true,
+        });
         // console.log("Quote received:", routes);
 
         // Check if the response is an error
@@ -215,6 +293,7 @@ export default function SwapPage() {
           setErrorMessage('errorMessage' in routes ? String(routes.errorMessage) : 'Unknown error');
         } else {
           setQuote(routes);
+          setSelectedRouteId(0);
         }
       } catch (err) {
         console.error("Quote Error:", err);
@@ -229,9 +308,59 @@ export default function SwapPage() {
     return () => clearTimeout(timer);
   }, [amountIn, fromToken, toToken, currentAddress]);
 
+  useEffect(() => {
+    if (!CETUS_PARTNER_ID) {
+      setPartnerRebates([]);
+      setPartnerRebateError('');
+      return;
+    }
+
+    let active = true;
+    const fetchRebates = async () => {
+      setPartnerRebateLoading(true);
+      setPartnerRebateError('');
+      try {
+        const res = await getPartnerRefFeeAmounts(CETUS_PARTNER_ID);
+        if (!active) return;
+        setPartnerRebates(Array.isArray(res) ? res : []);
+      } catch (err) {
+        if (!active) return;
+        setPartnerRebateError(err instanceof Error ? err.message : 'Failed to load rebates');
+      } finally {
+        if (active) setPartnerRebateLoading(false);
+      }
+    };
+
+    fetchRebates();
+    const interval = setInterval(fetchRebates, 30000);
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, [lastTxDigest]);
+
+  const effectiveQuote = quote ? applySelectedRoute(quote, selectedRouteId) : quote;
+  const receiptNote = ENABLE_RECEIPTS ? ' Receipt object minted.' : '';
+  const isZapMode = mode === 'transfer' && fromToken.symbol !== toToken.symbol;
+  const partnerInfo = getCetusPartnerInfo(
+    effectiveQuote,
+    isZapMode,
+    isValidSuiAddress(recipientAddress) ? recipientAddress : ''
+  );
+  const rebateSummary = partnerRebates
+    .filter((asset) => {
+      try {
+        return BigInt(asset.balance) > 0n;
+      } catch {
+        return false;
+      }
+    })
+    .map((asset) => `${formatCoinAmount(asset.coinAddress, asset.balance)} ${getTokenSymbol(asset.coinAddress)}`)
+    .join(' · ');
+
   // 🏗️ Build Swap Transaction Helper
   const buildSwapTransaction = useCallback(async () => {
-      if (!currentAddress || !quote) throw new Error("Missing params");
+      if (!currentAddress || !effectiveQuote) throw new Error("Missing params");
 
       let inputCoin;
       let tx: Transaction | null = null;
@@ -245,7 +374,7 @@ export default function SwapPage() {
       const isZap = mode === 'transfer' && fromToken.symbol !== toToken.symbol;
       const recipient = mode === 'transfer' ? recipientAddress : '';
 
-      if (quote.source !== 'clmm' || isZap) {
+      if (effectiveQuote.source !== 'clmm' || isZap) {
           tx = new Transaction();
           // Use extracted coin selection logic
           inputCoin = await selectAndPrepareCoins(
@@ -260,7 +389,7 @@ export default function SwapPage() {
       // Use slippage state (convert % to decimal, e.g. 0.5 -> 0.005)
       const finalTx = await buildSimpleSwapTx(
           tx, 
-          quote, 
+          effectiveQuote, 
           inputCoin, 
           currentAddress, 
           fromToken.type, 
@@ -275,7 +404,7 @@ export default function SwapPage() {
       }
       
       return finalTx;
-  }, [currentAddress, quote, amountIn, fromToken, mode, recipientAddress, suiClient, slippage, toToken.type, toToken.symbol]);
+  }, [currentAddress, effectiveQuote, amountIn, fromToken, mode, recipientAddress, suiClient, slippage, toToken.type, toToken.symbol]);
 
   // ⛽ Gas Estimation Hook
   useEffect(() => {
@@ -291,7 +420,7 @@ export default function SwapPage() {
         if (mode === 'transfer') {
              // ⚡ Zap Mode Check: If tokens are different, we estimate gas for the SWAP
              if (fromToken.symbol !== toToken.symbol) {
-                 if (!quote) {
+                 if (!effectiveQuote) {
                      setGasEstimate('---');
                      return;
                  }
@@ -318,7 +447,7 @@ export default function SwapPage() {
              }
         } else {
              // Swap Mode
-             if (!quote) {
+             if (!effectiveQuote) {
                  setGasEstimate('---');
                  return;
              }
@@ -326,23 +455,21 @@ export default function SwapPage() {
         }
 
         if (tx) {
-            const dryRunRes = await suiClient.dryRunTransactionBlock({
-                transactionBlock: await tx.build({ client: suiClient })
-            });
+            const preflight = await preflightTransaction(tx, suiClient, SUI_NETWORK);
+            setPreflightStatus(preflight);
 
-            if (dryRunRes.effects.status.status === 'success') {
-                const gasUsed = dryRunRes.effects.gasUsed;
-                const totalGas = BigInt(gasUsed.computationCost) + BigInt(gasUsed.storageCost) - BigInt(gasUsed.storageRebate);
-                setGasEstimate((Number(totalGas) / 1e9).toFixed(4));
+            if (preflight.ok) {
+                setGasEstimate(preflight.gasUsed || '---');
             } else {
-                const errorMsg = dryRunRes.effects.status.error || '';
+                const errorMsg = preflight.reason || '';
                 if (errorMsg.includes("InsufficientCoinBalance") || errorMsg.includes("Balance")) {
                    setGasEstimate("Low Bal.");
                 } else {
-                   console.error("❌ Gas Estimate DryRun Failed:", dryRunRes.effects.status);
                    setGasEstimate('Error');
                 }
             }
+        } else {
+            setPreflightStatus(null);
         }
       } catch (e) {
         // console.error("❌ Gas Estimate Exception:", e);
@@ -356,16 +483,17 @@ export default function SwapPage() {
 
     const timer = setTimeout(estimateGas, 800);
     return () => clearTimeout(timer);
-  }, [mode, amountIn, recipientAddress, currentAddress, fromToken, suiClient, memo, quote, slippage, buildSwapTransaction, toToken.type, toToken.symbol]);
+  }, [mode, amountIn, recipientAddress, currentAddress, fromToken, suiClient, memo, effectiveQuote, slippage, buildSwapTransaction, toToken.type, toToken.symbol, selectedRouteId]);
 
   const handleTransfer = async () => {
       if (!currentAddress) return;
       setSwapStatus('swapping'); 
       setErrorMessage('');
+      setLastReceiptId(null);
       
       // Check if it's a Zap Transfer (Swap + Send)
       if (fromToken.symbol !== toToken.symbol) {
-          if (!quote) {
+          if (!effectiveQuote) {
              setErrorMessage("Fetching quote...");
              setSwapStatus('error');
              return;
@@ -471,14 +599,40 @@ export default function SwapPage() {
     }
   };
 
+  const updateTradeStats = (activeQuote: ActiveQuote | null, success: boolean) => {
+    if (!activeQuote) return;
+    const comparison = activeQuote.comparison;
+    const savingsAbs = comparison && comparison.better === 'aggregator' ? comparison.savingsAbs : '0';
+    const savingsPct = comparison && comparison.better === 'aggregator' ? comparison.savingsPct : 0;
+    const providers = activeQuote.routeDetails?.providers || [];
+
+    recordTrade({
+      success,
+      source: activeQuote.source === 'aggregator' ? 'aggregator' : 'clmm',
+      savingsAbs,
+      savingsPct,
+      providers,
+    });
+    setTradeStats(getDerivedStats());
+  };
+
   const handleSwap = async () => {
-    if (!currentAddress || !quote) return;
+    if (!currentAddress || !effectiveQuote) return;
 
     setSwapStatus('swapping');
     setErrorMessage('');
+    setLastReceiptId(null);
 
     try {
       const finalTx = await buildSwapTransaction();
+      const preflight = await preflightTransaction(finalTx, suiClient, SUI_NETWORK);
+      setPreflightStatus(preflight);
+      if (!preflight.ok) {
+        const reason = preflight.reason || 'Preflight failed';
+        setErrorMessage(getFriendlyErrorMessage(reason));
+        setSwapStatus('error');
+        return;
+      }
 
       if (account) {
           // 🟢 Wallet Adapter Mode
@@ -491,6 +645,10 @@ export default function SwapPage() {
               setTxWaitMessage('Confirming transaction on blockchain...');
               setSwapStatus('confirming');
               setLastTxDigest(result.digest);
+              if (ENABLE_RECEIPTS) {
+                fetchReceiptIdFromDigest(result.digest);
+              }
+              updateTradeStats(effectiveQuote, true);
 
               // Wait for transaction confirmation
               setTimeout(() => {
@@ -503,7 +661,7 @@ export default function SwapPage() {
                       
                       setSuccessModalConfig({
                           title: 'Zap Transfer Successful!',
-                          desc: `Successfully swapped ${fromToken.symbol} and sent ${toToken.symbol} to recipient.`,
+                          desc: `Successfully swapped ${fromToken.symbol} and sent ${toToken.symbol} to recipient.${receiptNote}`,
                           btnText: 'Close'
                       });
                   } else {
@@ -511,7 +669,7 @@ export default function SwapPage() {
                       setQuote(null);
                       setSuccessModalConfig({
                           title: 'Swap Successful!',
-                          desc: 'Your transaction has been processed successfully.',
+                          desc: `Your transaction has been processed successfully.${receiptNote}`,
                           btnText: 'Close'
                       });
                   }
@@ -554,19 +712,23 @@ export default function SwapPage() {
             setTxWaitMessage('Confirming transaction on blockchain...');
             setSwapStatus('confirming');
             setLastTxDigest(response.digest);
+            if (ENABLE_RECEIPTS) {
+              fetchReceiptIdFromDigest(response.digest);
+            }
+            updateTradeStats(effectiveQuote, true);
 
             // Wait for transaction confirmation
             setTimeout(async () => {
               
               // Check for CLMM Zap Mode (2-Step Process)
-              if (mode === 'transfer' && fromToken.symbol !== toToken.symbol && quote.source === 'clmm') {
+              if (mode === 'transfer' && fromToken.symbol !== toToken.symbol && effectiveQuote.source === 'clmm') {
                   console.log("⚡ CLMM Zap: Initiating Step 2 (Transfer)...");
                   setTxWaitMessage('Step 1 (Swap) Complete. Please sign Step 2 (Transfer)...');
                   
                   try {
                       // Build Transfer Transaction
                       const tx2 = new Transaction();
-                      const safeAmount = BigInt(quote.amountOut) * BigInt(990) / BigInt(1000); 
+                      const safeAmount = BigInt(effectiveQuote.amountOut) * BigInt(990) / BigInt(1000); 
                       
                       const inputCoin2 = await selectAndPrepareCoins(
                            suiClient,
@@ -598,7 +760,7 @@ export default function SwapPage() {
                       setQuote(null);
                       setSuccessModalConfig({
                           title: 'Zap Transfer Successful!',
-                          desc: `Successfully swapped ${fromToken.symbol} and sent ${toToken.symbol} to recipient (2 Steps).`,
+                          desc: `Successfully swapped ${fromToken.symbol} and sent ${toToken.symbol} to recipient (2 Steps).${receiptNote}`,
                           btnText: 'Close'
                       });
                       setTxWaitMessage('');
@@ -624,7 +786,7 @@ export default function SwapPage() {
                   
                   setSuccessModalConfig({
                       title: 'Zap Transfer Successful!',
-                      desc: `Successfully swapped ${fromToken.symbol} and sent ${toToken.symbol} to recipient.`,
+                      desc: `Successfully swapped ${fromToken.symbol} and sent ${toToken.symbol} to recipient.${receiptNote}`,
                       btnText: 'Close'
                   });
               } else {
@@ -632,7 +794,7 @@ export default function SwapPage() {
                   setQuote(null);
                   setSuccessModalConfig({
                       title: 'Swap Successful!',
-                      desc: 'Your transaction has been processed successfully.',
+                      desc: `Your transaction has been processed successfully.${receiptNote}`,
                       btnText: 'Close'
                   });
               }
@@ -653,6 +815,7 @@ export default function SwapPage() {
       setSwapStatus('error');
       const msg = e instanceof Error ? e.message : String(e);
       setErrorMessage(getFriendlyErrorMessage(msg));
+      updateTradeStats(effectiveQuote, false);
     }
   };
   
@@ -685,12 +848,12 @@ export default function SwapPage() {
 
   // Calculate price impact
   const calculatePriceImpact = () => {
-    if (!quote || !amountIn || parseFloat(amountIn) <= 0) return null;
+    if (!effectiveQuote || !amountIn || parseFloat(amountIn) <= 0) return null;
 
     // Price Impact Calculation
     // Compares the theoretical output (based on spot price) vs actual output (based on pool depth)
     const inputAmount = parseFloat(amountIn);
-    const outputAmount = Number(quote.amountOut) / Math.pow(10, toToken.decimals);
+    const outputAmount = Number(effectiveQuote.amountOut) / Math.pow(10, toToken.decimals);
 
     // Baseline: Assume 0.3% LP fee is standard for V3 pools
     const estimatedFairOutput = inputAmount * 0.997; 
@@ -702,6 +865,7 @@ export default function SwapPage() {
   const priceImpact = calculatePriceImpact();
   const PRICE_IMPACT_THRESHOLD = 5; // Disable swap if price impact > 5%
   const isHighPriceImpact = priceImpact !== null && priceImpact > PRICE_IMPACT_THRESHOLD;
+  const noRoute = Boolean(errorMessage) && !effectiveQuote && !loading;
 
   // Generate popular pairs based on selected fromToken
   const getPopularPairs = () => {
@@ -736,9 +900,19 @@ export default function SwapPage() {
     return pairs;
   };
 
-  const outputAmount = quote
-    ? (Number(quote.amountOut) / Math.pow(10, toToken.decimals)).toFixed(4)
+  const outputAmount = effectiveQuote
+    ? (Number(effectiveQuote.amountOut) / Math.pow(10, toToken.decimals)).toFixed(4)
     : '---';
+
+  const topProvider = tradeStats
+    ? Object.entries(tradeStats.routeProviders || {}).sort((a, b) => b[1] - a[1])[0]?.[0]
+    : null;
+  const successRate = tradeStats && tradeStats.totalTrades > 0
+    ? ((tradeStats.successTrades / tradeStats.totalTrades) * 100).toFixed(0)
+    : null;
+  const aggregatorUsage = tradeStats && tradeStats.totalTrades > 0
+    ? ((tradeStats.aggregatorTrades / tradeStats.totalTrades) * 100).toFixed(0)
+    : null;
 
   return (
     <div className="min-h-screen bg-gray-50 flex">
@@ -785,7 +959,7 @@ export default function SwapPage() {
           <div className="mt-6">
             <div className="flex items-center gap-2">
               {mode === 'swap' ? <RefreshCcw className="h-6 w-6 animate-spin-slow" /> : <div className="h-6 w-6"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg></div>}
-              <h1 className="text-2xl font-bold">{mode === 'swap' ? 'Cetus Swap' : 'Transfer'}</h1>
+              <h1 className="text-2xl font-bold">{mode === 'swap' ? 'Cetus RoutePay' : 'Transfer'}</h1>
             </div>
             <p className="text-sm opacity-80 mt-1">{mode === 'swap' ? 'Best Price Aggregator' : 'Send tokens with memo'}</p>
           </div>
@@ -968,7 +1142,7 @@ export default function SwapPage() {
             <div className="bg-gray-50 p-4 rounded-xl border border-gray-100">
               <div className="flex justify-between mb-2">
                 <span className="text-sm font-medium text-gray-500">You Receive</span>
-                {quote && <span className="text-xs text-green-600 font-medium bg-green-50 px-2 py-0.5 rounded">Best Price</span>}
+                {effectiveQuote && <span className="text-xs text-green-600 font-medium bg-green-50 px-2 py-0.5 rounded">Best Price</span>}
               </div>
               <div className="flex gap-3 items-center">
                 <div className={`text-3xl font-bold w-full ${loading ? 'text-gray-300' : 'text-gray-800'}`}>
@@ -1060,13 +1234,13 @@ export default function SwapPage() {
           )}
 
           {/* Route Info & Price Impact */}
-          {quote && (
+          {effectiveQuote && (
             <div className="space-y-2">
-              <div className={`p-3 rounded-lg border ${quote.source === 'aggregator' ? 'bg-blue-50 border-blue-100' : 'bg-purple-50 border-purple-100'}`}>
+              <div className={`p-3 rounded-lg border ${effectiveQuote.source === 'aggregator' ? 'bg-blue-50 border-blue-100' : 'bg-purple-50 border-purple-100'}`}>
                 <div className="flex justify-between items-center mb-3">
                   <span className="font-semibold text-gray-800">Route Details</span>
-                  <span className={`px-2 py-0.5 rounded text-xs font-medium ${quote.source === 'aggregator' ? 'bg-blue-200 text-blue-900' : 'bg-purple-200 text-purple-900'}`}>
-                    {quote.source === 'aggregator' ? '🔀 Aggregator' : '🎯 Direct Pool'}
+                  <span className={`px-2 py-0.5 rounded text-xs font-medium ${effectiveQuote.source === 'aggregator' ? 'bg-blue-200 text-blue-900' : 'bg-purple-200 text-purple-900'}`}>
+                    {effectiveQuote.source === 'aggregator' ? '🔀 Aggregator' : '🎯 Direct Pool'}
                   </span>
                 </div>
 
@@ -1075,7 +1249,7 @@ export default function SwapPage() {
                   <div className="flex justify-between">
                     <span className="text-gray-600">Type:</span>
                     <span className="font-medium text-gray-800">
-                      {quote.source === 'aggregator' ? 'Multi-hop via Cetus Aggregator' : `Direct ${fromToken.symbol}-${toToken.symbol} Pool`}
+                      {effectiveQuote.source === 'aggregator' ? 'Multi-hop via Cetus Aggregator' : `Direct ${fromToken.symbol}-${toToken.symbol} Pool`}
                     </span>
                   </div>
 
@@ -1083,26 +1257,26 @@ export default function SwapPage() {
                   <div className="flex justify-between">
                     <span className="text-gray-600">Output:</span>
                     <span className="font-medium text-gray-800">
-                      {(Number(quote.amountOut) / Math.pow(10, toToken.decimals)).toFixed(6)} {toToken.symbol}
+                      {(Number(effectiveQuote.amountOut) / Math.pow(10, toToken.decimals)).toFixed(6)} {toToken.symbol}
                     </span>
                   </div>
 
                   {/* Fee Information */}
-                  {quote.estimatedFee !== undefined && (
+                  {effectiveQuote.estimatedFee !== undefined && (
                     <div className="flex justify-between">
                       <span className="text-gray-600">Est. Fee:</span>
                       <span className="font-medium text-gray-800">
-                        {quote.estimatedFee > 0 ? `${quote.estimatedFee} ${toToken.symbol}` : 'Included'}
+                        {effectiveQuote.estimatedFee > 0 ? `${effectiveQuote.estimatedFee} ${toToken.symbol}` : 'Included'}
                       </span>
                     </div>
                   )}
 
                   {/* Path Information */}
-                  {quote.source === 'aggregator' && quote.paths && (
+                  {effectiveQuote.source === 'aggregator' && effectiveQuote.paths && (
                     <div className="mt-2 pt-2 border-t border-blue-200">
-                      <div className="text-gray-600 mb-1">Paths ({quote.paths.length}):</div>
+                      <div className="text-gray-600 mb-1">Paths ({effectiveQuote.paths.length}):</div>
                       <div className="space-y-1">
-                        {quote.paths.map((path: { label?: string }, idx: number) => (
+                        {effectiveQuote.paths.map((path: { label?: string }, idx: number) => (
                           <div key={idx} className="text-gray-700 ml-2">
                             • {path.label || `Path ${idx + 1}`}
                           </div>
@@ -1112,14 +1286,117 @@ export default function SwapPage() {
                   )}
 
                   {/* Pool Address for Direct Swaps */}
-                  {quote.source !== 'aggregator' && quote.poolAddress && (
+                  {effectiveQuote.source !== 'aggregator' && effectiveQuote.poolAddress && (
                     <div className="mt-2 pt-2 border-t border-purple-200">
                       <div className="text-gray-600 mb-1">Pool:</div>
                       <div className="text-gray-700 ml-2 font-mono text-[10px] break-all">
-                        {quote.poolAddress.slice(0, 10)}...{quote.poolAddress.slice(-8)}
+                        {effectiveQuote.poolAddress.slice(0, 10)}...{effectiveQuote.poolAddress.slice(-8)}
                       </div>
                     </div>
                   )}
+
+                  {/* Fallback Transparency */}
+                  {effectiveQuote.meta?.fallbackReason && (
+                    <div className="mt-2 pt-2 border-t border-amber-200">
+                      <div className="text-amber-700 font-semibold">Fallback Activated</div>
+                      <div className="text-amber-600 text-[11px] mt-1">
+                        Aggregator unavailable → Direct Pool used ({effectiveQuote.meta.fallbackReason})
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Route Visualization */}
+                  {effectiveQuote.routeDetails?.steps?.length > 0 && (
+                    <div className="mt-2 pt-2 border-t border-gray-200">
+                      <div className="text-gray-600 mb-1">Route Map:</div>
+                      <div className="flex flex-wrap items-center gap-1 text-[11px] text-gray-700">
+                        {(effectiveQuote.routeDetails.steps || []).map((step: RouteStepDisplay, idx: number) => (
+                          <span key={`${step.from}-${step.to}-${idx}`} className="flex items-center gap-1">
+                            <span className="px-1.5 py-0.5 bg-white border border-gray-200 rounded">{step.fromSymbol}</span>
+                            <span className="text-gray-400">→</span>
+                            <span className="px-1.5 py-0.5 bg-white border border-gray-200 rounded">{step.toSymbol}</span>
+                            <span className="px-1.5 py-0.5 bg-blue-50 text-blue-700 border border-blue-200 rounded">
+                              {step.provider}
+                            </span>
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Savings Comparison */}
+                  {effectiveQuote.comparison && (
+                    <div className={`mt-2 pt-2 border-t ${effectiveQuote.comparison.better === 'aggregator' ? 'border-emerald-200' : 'border-yellow-200'}`}>
+                      <div className={`font-semibold ${effectiveQuote.comparison.better === 'aggregator' ? 'text-emerald-700' : 'text-yellow-700'}`}>
+                        {effectiveQuote.comparison.better === 'aggregator' ? 'Aggregator Savings' : 'Direct Pool Advantage'}
+                      </div>
+                      <div className="text-[11px] mt-1">
+                        {effectiveQuote.comparison.better === 'aggregator'
+                          ? `+${(Number(effectiveQuote.comparison.savingsAbs) / Math.pow(10, toToken.decimals)).toFixed(6)} ${toToken.symbol} (~${effectiveQuote.comparison.savingsPct.toFixed(2)}%)`
+                          : `-${(Number(effectiveQuote.comparison.savingsAbs) / Math.pow(10, toToken.decimals)).toFixed(6)} ${toToken.symbol} (~${effectiveQuote.comparison.savingsPct.toFixed(2)}%)`
+                        }
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Service Layer Status */}
+                  <div className="mt-2 pt-2 border-t border-gray-200">
+                    <div className="text-gray-600 mb-1">Service Layer:</div>
+                    <div className="space-y-1">
+                      {effectiveQuote.meta?.cache && (
+                        <div className="flex justify-between">
+                          <span className="text-gray-500">Quote Cache</span>
+                          <span className={`font-semibold ${effectiveQuote.meta.cache.hit ? 'text-green-600' : 'text-gray-600'}`}>
+                            {effectiveQuote.meta.cache.hit ? 'HIT' : 'MISS'}
+                          </span>
+                        </div>
+                      )}
+                      {typeof effectiveQuote.meta?.aggregatorLatencyMs === 'number' && (
+                        <div className="flex justify-between">
+                          <span className="text-gray-500">Aggregator Latency</span>
+                          <span className="font-semibold">{effectiveQuote.meta.aggregatorLatencyMs}ms</span>
+                        </div>
+                      )}
+                      {typeof effectiveQuote.meta?.clmmLatencyMs === 'number' && (
+                        <div className="flex justify-between">
+                          <span className="text-gray-500">CLMM Latency</span>
+                          <span className="font-semibold">{effectiveQuote.meta.clmmLatencyMs}ms</span>
+                        </div>
+                      )}
+                      <div className="flex justify-between">
+                        <span className="text-gray-500">Receipt Objects</span>
+                        <span className={`font-semibold ${ENABLE_RECEIPTS ? 'text-emerald-700' : 'text-gray-500'}`}>
+                          {ENABLE_RECEIPTS ? 'Enabled' : 'Disabled'}
+                        </span>
+                      </div>
+                      {isZapMode && (
+                        <>
+                          <div className="flex justify-between">
+                            <span className="text-gray-500">Cetus Referral (Zap)</span>
+                            <span className={`font-semibold ${partnerInfo.enabled ? 'text-emerald-700' : 'text-gray-500'}`}>
+                              {partnerInfo.enabled ? 'Enabled' : 'Off'}
+                            </span>
+                          </div>
+                          {!partnerInfo.enabled && partnerInfo.reason && (
+                            <div className="text-[11px] text-gray-500">
+                              Rebate unavailable: {partnerInfo.reason}
+                            </div>
+                          )}
+                        </>
+                      )}
+                      {CETUS_PARTNER_ID && (
+                        <div className="text-[11px] text-gray-500">
+                          {partnerRebateLoading
+                            ? 'Loading partner rebate...'
+                            : partnerRebateError
+                              ? `Rebate check failed`
+                              : rebateSummary
+                                ? `Claimable rebate: ${rebateSummary}`
+                                : 'No rebate yet'}
+                        </div>
+                      )}
+                    </div>
+                  </div>
                 </div>
               </div>
 
@@ -1146,6 +1423,34 @@ export default function SwapPage() {
                       <span className="font-bold text-gray-800">{slippage}%</span>
                   </div>
               </div>
+
+              {/* Cetus Impact Snapshot */}
+              {tradeStats && (
+                <div className="bg-emerald-50 p-3 rounded-lg border border-emerald-100 text-xs">
+                  <div className="flex justify-between items-center mb-2">
+                    <span className="font-semibold text-emerald-800">Cetus Impact</span>
+                    <span className="text-emerald-600">Local Stats</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 text-emerald-900">
+                    <div className="flex justify-between">
+                      <span className="text-emerald-700">Success Rate</span>
+                      <span className="font-bold">{successRate || '0'}%</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-emerald-700">Aggregator Usage</span>
+                      <span className="font-bold">{aggregatorUsage || '0'}%</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-emerald-700">Avg Savings</span>
+                      <span className="font-bold">{tradeStats.avgSavingsPct.toFixed(2)}%</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-emerald-700">Top Provider</span>
+                      <span className="font-bold">{topProvider || '—'}</span>
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {/* Multiple Routes Selection */}
               {quote && quote.source === 'aggregator' && quote.routes && quote.routes.length > 1 && (
@@ -1192,6 +1497,23 @@ export default function SwapPage() {
                   {gasEstimate === '---' || gasEstimate === 'Error' ? gasEstimate : `~${gasEstimate} SUI`}
               </span>
           </div>
+          {preflightStatus && (
+            <div className="flex justify-between items-center px-1 text-xs text-gray-500 mt-1">
+              <span className="flex items-center gap-1">Preflight</span>
+              <span className={`font-mono font-medium ${preflightStatus.ok ? 'text-emerald-600' : 'text-red-500'}`}>
+                {preflightStatus.ok ? 'OK' : 'Blocked'}
+                {preflightStatus.fallback ? ' (RPC fallback)' : ''}
+              </span>
+            </div>
+          )}
+          {preflightStatus && !preflightStatus.ok && preflightStatus.reason && (
+            <div
+              className="px-1 text-[11px] text-red-500 mt-1 truncate"
+              title={preflightStatus.reason}
+            >
+              {preflightStatus.reason}
+            </div>
+          )}
 
           {/* Action Button */}
           {!currentAddress ? (
@@ -1219,6 +1541,8 @@ export default function SwapPage() {
                   swapStatus === 'swapping' || 
                   parseFloat(amountIn) <= 0 || 
                   isHighPriceImpact ||
+                  (mode === 'swap' && !effectiveQuote) ||
+                  (mode === 'transfer' && fromToken.symbol !== toToken.symbol && !effectiveQuote) ||
                   (mode === 'transfer' && !isValidSuiAddress(recipientAddress))
               }
               className={`w-full py-4 mt-4 rounded-xl font-bold text-lg transition-all duration-300 transform hover:scale-[1.02] active:scale-[0.98] shadow-lg ${
@@ -1231,7 +1555,8 @@ export default function SwapPage() {
                     : 'bg-gradient-to-r from-purple-600 to-pink-600 text-white hover:shadow-purple-500/30'
               }`}
             >
-               {loading ? 'Finding Best Route...' : 
+               {noRoute ? 'No Available Route' :
+                loading ? 'Finding Best Route...' : 
                 swapStatus === 'swapping' ? 'Processing Transaction...' :
                 isHighPriceImpact ? 'Price Impact Too High' :
                 mode === 'swap' ? 'Review Swap' : 'Review Transfer'}
@@ -1263,7 +1588,7 @@ export default function SwapPage() {
                         <span className="text-gray-500 text-sm">You Receive</span>
                         <div className="text-right">
                             <div className="font-bold text-lg text-green-600">
-                                {quote ? (Number(quote.amountOut) / Math.pow(10, toToken.decimals)).toFixed(4) : '---'} {toToken.symbol}
+                                {effectiveQuote ? (Number(effectiveQuote.amountOut) / Math.pow(10, toToken.decimals)).toFixed(4) : '---'} {toToken.symbol}
                             </div>
                             {mode === 'transfer' && fromToken.symbol !== toToken.symbol && (
                                 <div className="text-xs text-purple-600 font-bold mt-1">Zap Mode Active ⚡</div>
@@ -1352,7 +1677,7 @@ export default function SwapPage() {
               </div>
           )}
 
-          {swapStatus === 'error' && (
+          {errorMessage && (
               <div className="p-3 bg-red-100 text-red-700 rounded-lg text-center text-sm break-all flex items-center gap-2 justify-center">
                   <XCircle size={18} />
                   <span>{errorMessage}</span>
@@ -1390,6 +1715,38 @@ export default function SwapPage() {
                >
                  Tx: {lastTxDigest}
                </a>
+             )}
+
+             {lastReceiptId && (
+               <div className="mb-6 space-y-2">
+                 <a
+                   href={`/receipt/${lastReceiptId}`}
+                   target="_blank"
+                   rel="noopener noreferrer"
+                   className="block bg-emerald-50 hover:bg-emerald-100 rounded-lg p-3 text-xs text-emerald-700 break-all font-mono transition-colors cursor-pointer"
+                 >
+                   Receipt: {lastReceiptId}
+                 </a>
+                 <div className="flex gap-2">
+                   <button
+                     onClick={() => {
+                       const link = `${window.location.origin}/receipt/${lastReceiptId}`;
+                       navigator.clipboard.writeText(link).catch(() => {});
+                     }}
+                     className="flex-1 bg-white border border-gray-200 hover:bg-gray-50 text-gray-700 text-xs font-semibold py-2 rounded-lg transition-colors"
+                   >
+                     Copy Receipt Link
+                   </button>
+                   <a
+                     href={`${SUI_NETWORK === 'mainnet' ? 'https://suiscan.xyz/mainnet' : 'https://suiscan.xyz/testnet'}/object/${lastReceiptId}`}
+                     target="_blank"
+                     rel="noopener noreferrer"
+                     className="flex-1 bg-white border border-gray-200 hover:bg-gray-50 text-gray-700 text-xs font-semibold py-2 rounded-lg text-center transition-colors"
+                   >
+                     View on Explorer
+                   </a>
+                 </div>
+               </div>
              )}
 
              <button 

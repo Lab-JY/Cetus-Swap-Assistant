@@ -14,8 +14,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Cetus Swap - Best Price Aggregator",
-  description: "Swap tokens on Sui with the best rates using Cetus Aggregator SDK.",
+  title: "Cetus RoutePay - Swap & Send on Sui",
+  description: "Swap and pay on Sui with Cetus Aggregator routing and CLMM fallback.",
 };
 
 export default function RootLayout({
