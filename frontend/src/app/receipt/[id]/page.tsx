@@ -90,7 +90,7 @@ export default function ReceiptPage({ params }: { params: { id: string } }) {
           amountOut: String(fields.amount_out || '0'),
           route: String(fields.route || ''),
           epoch: String(fields.timestamp || ''),
-          txDigest: data?.previousTransaction,
+          txDigest: data?.previousTransaction || undefined,
         });
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to load receipt');

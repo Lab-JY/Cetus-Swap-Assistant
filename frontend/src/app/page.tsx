@@ -202,7 +202,7 @@ export default function SwapPage() {
 
   const fetchReceiptIdFromDigest = useCallback(async (digest: string) => {
     try {
-      const tx = await suiClient.waitForTransactionBlock({
+      const tx = await suiClient.waitForTransaction({
         digest,
         options: { showEvents: true },
       });
@@ -350,7 +350,7 @@ export default function SwapPage() {
   const rebateSummary = partnerRebates
     .filter((asset) => {
       try {
-        return BigInt(asset.balance) > 0n;
+        return BigInt(asset.balance) > BigInt(0);
       } catch {
         return false;
       }

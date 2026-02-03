@@ -93,7 +93,7 @@ export type PartnerInfo = {
     partnerId?: string;
 };
 
-const isCetusProvider = (provider: string) => provider.toLowerCase().includes('cetus');
+const isCetusProvider = (provider: unknown) => String(provider || '').toLowerCase().includes('cetus');
 
 export const getCetusPartnerInfo = (
     quote: any | null,
@@ -124,6 +124,46 @@ export const getPartnerRefFeeAmounts = async (partnerId: string = CETUS_PARTNER_
 };
 
 const toBn = (value: string | number | BN) => value instanceof BN ? value : new BN(value);
+const normalizeType = (type: string) => {
+    if (!type) return '';
+    const parts = type.split('::');
+    if (parts.length < 3) return type.toLowerCase();
+    const [addr, ...rest] = parts;
+    let normalized = addr;
+    try {
+        normalized = normalizeSuiAddress(addr);
+    } catch {
+        // keep original if not a valid address
+    }
+    return `${normalized}::${rest.join('::')}`.toLowerCase();
+};
+
+const getPathEndpoints = (path: any) => {
+    if (!path) return { from: '', to: '' };
+    if (path.from && (path.target || path.to)) {
+        return { from: path.from, to: path.target || path.to };
+    }
+    if (Array.isArray(path.path) && path.path.length > 0) {
+        const first = path.path[0] || {};
+        const last = path.path[path.path.length - 1] || {};
+        return {
+            from: first.from || first.coinIn || '',
+            to: last.target || last.to || last.coinOut || '',
+        };
+    }
+    if (Array.isArray(path.steps) && path.steps.length > 0) {
+        const first = path.steps[0] || {};
+        const last = path.steps[path.steps.length - 1] || {};
+        return {
+            from: first.from || first.coinIn || '',
+            to: last.to || last.target || last.coinOut || '',
+        };
+    }
+    return {
+        from: path.from || path.coinIn || '',
+        to: path.target || path.to || path.coinOut || '',
+    };
+};
 
 const buildRouteDetails = (source: 'aggregator' | 'clmm', steps: RouteStep[]): RouteDetails => {
     const providers = Array.from(new Set(steps.map((s) => s.provider)));
@@ -267,18 +307,23 @@ export async function getSwapQuote(
         });
         meta.aggregatorLatencyMs = Date.now() - aggStart;
 
-        const normalizeType = (value: string) => (value || '').toLowerCase();
+        const normalizedFrom = normalizeType(fromCoinType);
+        const normalizedTo = normalizeType(toCoinType);
         const validPaths = routerData?.paths?.filter((path: any) => {
-            return normalizeType(path.from) === normalizeType(fromCoinType)
-                && normalizeType(path.target) === normalizeType(toCoinType);
+            const endpoints = getPathEndpoints(path);
+            return normalizeType(endpoints.from) === normalizedFrom
+                && normalizeType(endpoints.to) === normalizedTo;
         }) || [];
 
         if (routerData && validPaths.length > 0) {
             const sortedPaths = validPaths.sort((a: any, b: any) => toBn(b.amountOut).cmp(toBn(a.amountOut)));
             const routes = sortedPaths.map((path: any, idx: number) => {
+                const endpoints = getPathEndpoints(path);
+                const pathFrom = endpoints.from || path.from;
+                const pathTo = endpoints.to || path.target || path.to;
                 const pathSteps = [{
-                    from: path.from,
-                    to: path.target,
+                    from: pathFrom,
+                    to: pathTo,
                     provider: path.provider,
                     feeRate: path.feeRate,
                     amountIn: path.amountIn,
@@ -297,21 +342,29 @@ export async function getSwapQuote(
                 };
             });
 
-            const bestPath = sortedPaths[0];
+            const bestPath: any = sortedPaths[0];
+            const bestEndpoints = getPathEndpoints(bestPath);
+            const bestFrom = bestEndpoints.from || bestPath.from;
+            const bestTo = bestEndpoints.to || bestPath.target || bestPath.to;
             const routeSteps: RouteStep[] = [{
-                from: bestPath.from,
-                to: bestPath.target,
-                fromSymbol: getTokenSymbol(bestPath.from),
-                toSymbol: getTokenSymbol(bestPath.target),
+                from: bestFrom,
+                to: bestTo,
+                fromSymbol: getTokenSymbol(bestFrom),
+                toSymbol: getTokenSymbol(bestTo),
                 provider: bestPath.provider || 'Cetus Aggregator',
                 feeRate: bestPath.feeRate,
             }];
 
-            const paths = sortedPaths.map((path: any, idx: number) => ({
-                label: `${getTokenSymbol(path.from)}→${getTokenSymbol(path.target)} (${path.provider || 'Cetus'})`,
-                steps: [path],
-                id: idx,
-            }));
+            const paths = sortedPaths.map((path: any, idx: number) => {
+                const endpoints = getPathEndpoints(path);
+                const pathFrom = endpoints.from || path.from;
+                const pathTo = endpoints.to || path.target || path.to;
+                return {
+                    label: `${getTokenSymbol(pathFrom)}→${getTokenSymbol(pathTo)} (${path.provider || 'Cetus'})`,
+                    steps: [path],
+                    id: idx,
+                };
+            });
 
             const normalizedAmountOut = typeof bestPath.amountOut?.toString === 'function'
                 ? bestPath.amountOut.toString()
@@ -406,9 +459,19 @@ export async function buildSimpleSwapTx(
             ? { ...quote.router, paths: quote.selectedRoute.router.path }
             : quote.router;
         const routePaths = quote.selectedRoute?.router?.path || quote.router?.paths || quote.router?.path || [];
-        const invalidTarget = routePaths.find((path: any) => (path?.target || '').toLowerCase() !== toCoinType.toLowerCase());
-        if (invalidTarget) {
-            throw new Error(`Route target mismatch. Expected ${getTokenSymbol(toCoinType)}, got ${getTokenSymbol(invalidTarget.target)}.`);
+        if (Array.isArray(routePaths) && routePaths.length > 0) {
+            const firstHop = routePaths[0] || {};
+            const lastHop = routePaths[routePaths.length - 1] || {};
+            const finalTarget = (lastHop.target || lastHop.to || lastHop.coinOut || '') as string;
+            const finalFrom = (firstHop.from || firstHop.coinIn || '') as string;
+            const expectedFrom = normalizeType(fromCoinType);
+            const expectedTo = normalizeType(toCoinType);
+            if (finalFrom && normalizeType(finalFrom) !== expectedFrom) {
+                throw new Error(`Route source mismatch. Expected ${getTokenSymbol(fromCoinType)}, got ${getTokenSymbol(finalFrom)}.`);
+            }
+            if (finalTarget && normalizeType(finalTarget) !== expectedTo) {
+                throw new Error(`Route target mismatch. Expected ${getTokenSymbol(toCoinType)}, got ${getTokenSymbol(finalTarget)}.`);
+            }
         }
         // Set sender address on transaction for Aggregator SDK
         tx.setSender(userAddress);
@@ -750,10 +813,11 @@ export function applySelectedRoute(quote: any, selectedRouteId: number) {
 
 // Helper to get token symbol from coin type
 export function getTokenSymbol(coinType: string): string {
+    const normalized = normalizeType(coinType);
     if (coinType.includes('::sui::SUI')) return 'SUI';
     if (coinType.includes('::usdc::USDC')) return 'USDC';
     if (coinType.includes('::cetus::CETUS')) return 'CETUS';
-    if (coinType.includes('::coin::COIN')) return 'wUSDC';
+    if (normalizeType(TOKENS.wUSDC) === normalized) return 'wUSDC';
     if (coinType.includes('::meme_token::MEME_TOKEN')) return 'MEME';
     if (coinType.includes('::idol_apple')) return 'IDOL_APPLE';
     if (coinType.includes('::idol_dgran')) return 'IDOL_DGRAN';
