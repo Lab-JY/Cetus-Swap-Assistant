@@ -12,6 +12,7 @@ export const ERROR_MAPPING: Record<string, string> = {
     'Failed to fetch quote': '获取报价失败',
     'Dry run failed': '交易预检失败',
     'Preflight failed': '交易预检失败',
+    'Route target mismatch': '路由目标币不一致，请重试',
     'JWT not found': '未找到登录凭证 (JWT)',
     'Transfer Failed': '转账失败',
     'zkLogin transaction failed': 'zkLogin 交易失败',

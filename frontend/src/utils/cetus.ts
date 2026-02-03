@@ -267,8 +267,15 @@ export async function getSwapQuote(
         });
         meta.aggregatorLatencyMs = Date.now() - aggStart;
 
-        if (routerData && routerData.paths && routerData.paths.length > 0) {
-            const routes = routerData.paths.map((path: any, idx: number) => {
+        const normalizeType = (value: string) => (value || '').toLowerCase();
+        const validPaths = routerData?.paths?.filter((path: any) => {
+            return normalizeType(path.from) === normalizeType(fromCoinType)
+                && normalizeType(path.target) === normalizeType(toCoinType);
+        }) || [];
+
+        if (routerData && validPaths.length > 0) {
+            const sortedPaths = validPaths.sort((a: any, b: any) => toBn(b.amountOut).cmp(toBn(a.amountOut)));
+            const routes = sortedPaths.map((path: any, idx: number) => {
                 const pathSteps = [{
                     from: path.from,
                     to: path.target,
@@ -290,39 +297,40 @@ export async function getSwapQuote(
                 };
             });
 
-            const routeSteps: RouteStep[] = routerData.paths.map((path: any) => ({
-                from: path.from,
-                to: path.target,
-                fromSymbol: getTokenSymbol(path.from),
-                toSymbol: getTokenSymbol(path.target),
-                provider: path.provider || 'Cetus Aggregator',
-                feeRate: path.feeRate,
-            }));
+            const bestPath = sortedPaths[0];
+            const routeSteps: RouteStep[] = [{
+                from: bestPath.from,
+                to: bestPath.target,
+                fromSymbol: getTokenSymbol(bestPath.from),
+                toSymbol: getTokenSymbol(bestPath.target),
+                provider: bestPath.provider || 'Cetus Aggregator',
+                feeRate: bestPath.feeRate,
+            }];
 
-            const paths = routerData.paths.map((path: any, idx: number) => ({
+            const paths = sortedPaths.map((path: any, idx: number) => ({
                 label: `${getTokenSymbol(path.from)}→${getTokenSymbol(path.target)} (${path.provider || 'Cetus'})`,
                 steps: [path],
                 id: idx,
             }));
 
-            const normalizedAmountOut = typeof routerData.amountOut?.toString === 'function'
-                ? routerData.amountOut.toString()
-                : routerData.amountOut;
+            const normalizedAmountOut = typeof bestPath.amountOut?.toString === 'function'
+                ? bestPath.amountOut.toString()
+                : bestPath.amountOut;
 
             aggregatorQuote = {
                 amountOut: normalizedAmountOut,
                 estimatedFee: 0,
-                router: routerData,
+                router: { ...routerData, paths: sortedPaths },
                 source: 'aggregator',
                 routes: routes,
                 paths,
-                selectedRouteId: 0, // Default to best route
-                rawSwapResult: routerData,
+                selectedRouteId: 0, // Best route is first after sorting
+                rawSwapResult: { ...routerData, paths: sortedPaths },
                 fullRouterData: routerData,
                 routeDetails: buildRouteDetails('aggregator', routeSteps),
             };
         } else {
-            aggregatorError = 'No routes found';
+            aggregatorError = 'No valid routes for requested target';
         }
     } catch (error) {
         meta.aggregatorLatencyMs = Date.now() - aggStart;
@@ -397,6 +405,11 @@ export async function buildSimpleSwapTx(
         const router = quote.selectedRoute?.router
             ? { ...quote.router, paths: quote.selectedRoute.router.path }
             : quote.router;
+        const routePaths = quote.selectedRoute?.router?.path || quote.router?.paths || quote.router?.path || [];
+        const invalidTarget = routePaths.find((path: any) => (path?.target || '').toLowerCase() !== toCoinType.toLowerCase());
+        if (invalidTarget) {
+            throw new Error(`Route target mismatch. Expected ${getTokenSymbol(toCoinType)}, got ${getTokenSymbol(invalidTarget.target)}.`);
+        }
         // Set sender address on transaction for Aggregator SDK
         tx.setSender(userAddress);
         
