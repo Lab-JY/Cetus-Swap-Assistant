@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { ConnectButton, useCurrentAccount, useSignAndExecuteTransaction, useSuiClient, useSuiClientQuery } from '@mysten/dapp-kit';
 import { Transaction } from '@mysten/sui/transactions';
 import { isValidSuiAddress } from '@mysten/sui/utils';
-import { SUI_COIN_TYPE, USDC_COIN_TYPE, CETUS_COIN_TYPE, WUSDC_COIN_TYPE, buildSimpleSwapTx, SUI_NETWORK, buildTransferTx, selectAndPrepareCoins, applySelectedRoute, ENABLE_RECEIPTS, getCetusPartnerInfo, getPartnerRefFeeAmounts, CETUS_PARTNER_ID, formatCoinAmount, getTokenSymbol } from '@/utils/cetus';
+import { buildSimpleSwapTx, SUI_NETWORK, buildTransferTx, selectAndPrepareCoins, applySelectedRoute, ENABLE_RECEIPTS, getCetusPartnerInfo, getPartnerRefFeeAmounts, CETUS_PARTNER_ID, formatCoinAmount, getTokenSymbol } from '@/utils/cetus';
 import { getQuoteWithCache } from '@/utils/quoteService';
 import { preflightTransaction } from '@/utils/preflight';
 import { getDerivedStats, recordTrade } from '@/utils/tradeStats';
@@ -12,28 +12,21 @@ import { executeWithRetry } from '@/utils/retry';
 import { getFriendlyErrorMessage } from '@/utils/errors';
 import TransactionStepper from '@/components/TransactionStepper';
 import Image from 'next/image';
-import { RefreshCcw, ArrowDownUp, Wallet, LogOut, Copy, CheckCircle2, XCircle, Settings } from 'lucide-react';
+import { RefreshCcw, ArrowDownUp, Wallet, LogOut, Copy, XCircle, Settings } from 'lucide-react';
 import { getGoogleLoginUrl, clearZkLoginSession, signTransactionWithZkLogin } from '@/utils/zklogin';
 import confetti from 'canvas-confetti';
 import SwapHistory from '@/components/SwapHistory';
+import ReviewModal from '@/components/ReviewModal';
+import SuccessModal from '@/components/SuccessModal';
+import TokenInput from '@/components/TokenInput';
 
-const MAINNET_TOKENS = [
-  { symbol: 'SUI', name: 'Sui', type: SUI_COIN_TYPE, decimals: 9, icon: '💧' },
-  { symbol: 'USDC', name: 'USD Coin', type: USDC_COIN_TYPE, decimals: 6, icon: '💵' },
-  { symbol: 'CETUS', name: 'Cetus Token', type: CETUS_COIN_TYPE, decimals: 9, icon: '🌊' },
-  { symbol: 'wUSDC', name: 'Wormhole USDC', type: WUSDC_COIN_TYPE, decimals: 6, icon: '🌉' },
-];
-
-const TESTNET_TOKENS = [
-  { symbol: 'SUI', name: 'Sui', type: '0x2::sui::SUI', decimals: 9, icon: '💧' },
-  { symbol: 'MEME', name: 'Meme Token', type: '0x5bab1e6852a537a8b07edd10ed9bc2e41d9c75b2ada472bc9bd6bed14000563b::meme_token::MEME_TOKEN', decimals: 9, icon: '🎭' },
-  { symbol: 'IDOL_APPLE', name: 'Idol Apple', type: '0xb8adb26867c2dfecdbd7c309754b1e6cc15a0bbe767d28fc28bece56ad991d4c::idol_apple_1767616383788::IDOL_APPLE_1767616383788', decimals: 9, icon: '🍎' },
-  { symbol: 'IDOL_DGRAN', name: 'Idol Dgran', type: '0xbe4c4cc55d3aaa1a9c01f17b88199b06b96c032fc698184ea71235260f1d6d4c::idol_dgran_1767614261042::IDOL_DGRAN_1767614261042', decimals: 9, icon: '🎪' },
-];
-
-const TOKENS_LIST = SUI_NETWORK === 'testnet' ? TESTNET_TOKENS : MAINNET_TOKENS;
-
+import { useTokens, TokenInfo } from '@/hooks/useTokens';
 import { secureStorage } from '@/utils/storage';
+
+// Removed hardcoded token lists
+// const MAINNET_TOKENS = ...
+// const TESTNET_TOKENS = ...
+// const TOKENS_LIST = ...
 
 type RouteStepDisplay = {
   fromSymbol: string;
@@ -128,8 +121,22 @@ export default function SwapPage() {
   const [memo, setMemo] = useState('');
   const [gasEstimate, setGasEstimate] = useState<string>('---');
 
-  const [fromToken, setFromToken] = useState(TOKENS_LIST[0]); // Default SUI
-  const [toToken, setToToken] = useState(TOKENS_LIST[1]);   // Default USDC
+  const { tokens: TOKENS_LIST, error: tokenError } = useTokens();
+
+  // Initialize fromToken and toToken when TOKENS_LIST is loaded
+  const [fromToken, setFromToken] = useState<TokenInfo | null>(null);
+  const [toToken, setToToken] = useState<TokenInfo | null>(null);
+
+  useEffect(() => {
+    if (TOKENS_LIST.length > 0) {
+      // Preserve existing selection if still valid, otherwise default
+      if (!fromToken) setFromToken(TOKENS_LIST[0]);
+      if (!toToken) setToToken(TOKENS_LIST[1] || TOKENS_LIST[0]);
+    }
+  }, [TOKENS_LIST, fromToken, toToken]);
+
+  // If tokens are loading or failed, show a loader or error state (simplified handling)
+  // For now, we rely on default tokens from useTokens hook so TOKENS_LIST is never empty
   const [amountIn, setAmountIn] = useState('');
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [quote, setQuote] = useState<any>(null);
@@ -139,6 +146,7 @@ export default function SwapPage() {
   const [showSuccessModal, setShowSuccessModal] = useState(false);
   const [lastTxDigest, setLastTxDigest] = useState('');
   const [lastReceiptId, setLastReceiptId] = useState<string | null>(null);
+  const [receiptError, setReceiptError] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
   const [txWaitMessage, setTxWaitMessage] = useState('');
   const [historyRefreshTrigger, setHistoryRefreshTrigger] = useState(0);
@@ -164,15 +172,15 @@ export default function SwapPage() {
     'getBalance',
     {
       owner: currentAddress || '',
-      coinType: fromToken.type,
+      coinType: fromToken?.type || '',
     },
     {
-      enabled: !!currentAddress,
+      enabled: !!currentAddress && !!fromToken,
       refetchInterval: 10000,
     }
   );
 
-  const balance = balanceData 
+  const balance = balanceData && fromToken
     ? (parseInt(balanceData.totalBalance) / Math.pow(10, fromToken.decimals))
     : 0;
 
@@ -201,21 +209,27 @@ export default function SwapPage() {
   }, []);
 
   const fetchReceiptIdFromDigest = useCallback(async (digest: string) => {
+    setReceiptError('');
     try {
       const tx = await suiClient.waitForTransaction({
         digest,
         options: { showEvents: true },
       });
       const receiptId = extractReceiptIdFromEvents(tx.events as ReceiptEvent[] | undefined);
-      if (receiptId) setLastReceiptId(receiptId);
+      if (receiptId) {
+          setLastReceiptId(receiptId);
+      } else {
+          setReceiptError('Receipt not found in transaction events.');
+      }
     } catch (err) {
       // ignore receipt lookup errors to avoid blocking success flow
       console.warn('Failed to load receipt id', err);
+      setReceiptError('Failed to fetch receipt (Timeout or Network Error).');
     }
   }, [suiClient, extractReceiptIdFromEvents]);
 
   const handleMax = () => {
-    if (!balanceData || !balanceData.totalBalance) return;
+    if (!balanceData || !balanceData.totalBalance || !fromToken) return;
     
     const decimals = fromToken.decimals;
     const rawBalance = BigInt(balanceData.totalBalance);
@@ -253,8 +267,8 @@ export default function SwapPage() {
   // Debounce Quote Fetching
   useEffect(() => {
     const fetchQuote = async () => {
-      // 🛑 Pre-check: Don't fetch if tokens are the same
-      if (fromToken.symbol === toToken.symbol) {
+      // 🛑 Pre-check: Don't fetch if tokens are the same or null
+      if (!fromToken || !toToken || fromToken.symbol === toToken.symbol) {
           setQuote(null);
           setErrorMessage('');
           setGasEstimate('---');
@@ -341,7 +355,7 @@ export default function SwapPage() {
 
   const effectiveQuote = quote ? applySelectedRoute(quote, selectedRouteId) : quote;
   const receiptNote = ENABLE_RECEIPTS ? ' Receipt object minted.' : '';
-  const isZapMode = mode === 'transfer' && fromToken.symbol !== toToken.symbol;
+  const isZapMode = Boolean(mode === 'transfer' && fromToken && toToken && fromToken.symbol !== toToken.symbol);
   const partnerInfo = getCetusPartnerInfo(
     effectiveQuote,
     isZapMode,
@@ -360,7 +374,7 @@ export default function SwapPage() {
 
   // 🏗️ Build Swap Transaction Helper
   const buildSwapTransaction = useCallback(async () => {
-      if (!currentAddress || !effectiveQuote) throw new Error("Missing params");
+      if (!currentAddress || !effectiveQuote || !fromToken || !toToken) throw new Error("Missing params");
 
       let inputCoin;
       let tx: Transaction | null = null;
@@ -404,12 +418,12 @@ export default function SwapPage() {
       }
       
       return finalTx;
-  }, [currentAddress, effectiveQuote, amountIn, fromToken, mode, recipientAddress, suiClient, slippage, toToken.type, toToken.symbol]);
+  }, [currentAddress, effectiveQuote, amountIn, fromToken, mode, recipientAddress, suiClient, slippage, toToken]);
 
   // ⛽ Gas Estimation Hook
   useEffect(() => {
     const estimateGas = async () => {
-      if (!currentAddress || !amountIn) {
+      if (!currentAddress || !amountIn || !fromToken || !toToken) {
         setGasEstimate('---');
         return;
       }
@@ -483,10 +497,10 @@ export default function SwapPage() {
 
     const timer = setTimeout(estimateGas, 800);
     return () => clearTimeout(timer);
-  }, [mode, amountIn, recipientAddress, currentAddress, fromToken, suiClient, memo, effectiveQuote, slippage, buildSwapTransaction, toToken.type, toToken.symbol, selectedRouteId]);
+  }, [mode, amountIn, recipientAddress, currentAddress, fromToken, suiClient, memo, effectiveQuote, slippage, buildSwapTransaction, toToken, selectedRouteId]);
 
   const handleTransfer = async () => {
-      if (!currentAddress) return;
+      if (!currentAddress || !fromToken || !toToken) return;
       setSwapStatus('swapping'); 
       setErrorMessage('');
       setLastReceiptId(null);
@@ -507,6 +521,8 @@ export default function SwapPage() {
       }
 
       try {
+        if (!fromToken) throw new Error('Source token not selected');
+
         const tx = new Transaction();
         const amountRaw = parseAmount(amountIn, fromToken.decimals);
         
@@ -523,6 +539,16 @@ export default function SwapPage() {
         // tx.transferObjects([inputCoin], tx.pure.address(recipientAddress));
         // Use buildTransferTx to ensure TransferEvent is emitted for history tracking
         await buildTransferTx(tx, inputCoin, recipientAddress, fromToken.type, memo);
+
+        // 🛡️ Preflight & Gas Budget
+        const preflight = await preflightTransaction(tx, suiClient, SUI_NETWORK);
+        if (!preflight.ok) {
+             throw new Error(preflight.reason || "Preflight failed");
+        }
+        if (preflight.gasEstimate) {
+             const budget = preflight.gasEstimate * BigInt(120) / BigInt(100);
+             tx.setGasBudget(budget);
+        }
 
         // Execute
         if (loginMethod === 'zklogin') {
@@ -634,6 +660,12 @@ export default function SwapPage() {
         return;
       }
 
+      // ⚡ Apply Dynamic Gas Budget (Estimate + 20% Buffer)
+      if (preflight.gasEstimate) {
+          const budget = preflight.gasEstimate * BigInt(120) / BigInt(100);
+          finalTx.setGasBudget(budget);
+      }
+
       if (account) {
           // 🟢 Wallet Adapter Mode
           setTxWaitMessage('Waiting for wallet confirmation...');
@@ -655,7 +687,7 @@ export default function SwapPage() {
                   setSwapStatus('success');
                   
                   // Check for Zap Mode Success
-                  if (mode === 'transfer' && fromToken.symbol !== toToken.symbol) {
+                  if (mode === 'transfer' && fromToken && toToken && fromToken.symbol !== toToken.symbol) {
                       setAmountIn('');
                       setQuote(null);
                       
@@ -720,73 +752,27 @@ export default function SwapPage() {
             // Wait for transaction confirmation
             setTimeout(async () => {
               
-              // Check for CLMM Zap Mode (2-Step Process)
-              if (mode === 'transfer' && fromToken.symbol !== toToken.symbol && effectiveQuote.source === 'clmm') {
-                  console.log("⚡ CLMM Zap: Initiating Step 2 (Transfer)...");
-                  setTxWaitMessage('Step 1 (Swap) Complete. Please sign Step 2 (Transfer)...');
-                  
-                  try {
-                      // Build Transfer Transaction
-                      const tx2 = new Transaction();
-                      const safeAmount = BigInt(effectiveQuote.amountOut) * BigInt(990) / BigInt(1000); 
-                      
-                      const inputCoin2 = await selectAndPrepareCoins(
-                           suiClient,
-                           zkLoginAddress,
-                           toToken.type,
-                           safeAmount,
-                           tx2
-                      );
-                      
-                      await buildTransferTx(tx2, inputCoin2, recipientAddress, toToken.type, memo);
-                      
-                      // Execute Step 2
-                      const jwt = secureStorage.getItem<string>('zklogin_jwt');
-                      if (!jwt) throw new Error('JWT missing for step 2');
-                      
-                      const { transactionBlockSerialized, signature } = await signTransactionWithZkLogin(tx2, jwt);
-                      const res2 = await suiClient.executeTransactionBlock({
-                        transactionBlock: transactionBlockSerialized,
-                        signature: signature,
-                        options: { showEffects: true }
-                      });
-                      
-                      setLastTxDigest(res2.digest);
-                      console.log("⚡ CLMM Zap Step 2 Success:", res2.digest);
-                      
-                      // Final Success Handling
-                      setSwapStatus('success');
-                      setAmountIn('');
-                      setQuote(null);
-                      setSuccessModalConfig({
-                          title: 'Zap Transfer Successful!',
-                          desc: `Successfully swapped ${fromToken.symbol} and sent ${toToken.symbol} to recipient (2 Steps).${receiptNote}`,
-                          btnText: 'Close'
-                      });
-                      setTxWaitMessage('');
-                      refetchBalance();
-                      setHistoryRefreshTrigger(prev => prev + 1);
-                      setShowSuccessModal(true);
-                      triggerConfetti();
-                      return;
-
-                  } catch (err) {
-                      console.error("CLMM Zap Step 2 Failed:", err);
-                      setErrorMessage("Swap succeeded, but Transfer failed. Please transfer manually.");
-                      setSwapStatus('error');
-                      return;
-                  }
-              }
+              // 🧠 Phase 3: Atomic Zap Enabled - No more Step 2 needed!
+              // The transaction is now atomic for both Aggregator and CLMM (via Synthetic Router).
+              // We can proceed directly to success handling.
 
               setSwapStatus('success');
               
-              if (mode === 'transfer' && fromToken.symbol !== toToken.symbol) {
+              if (mode === 'transfer' && fromToken && toToken && fromToken.symbol !== toToken.symbol) {
                   setAmountIn('');
                   setQuote(null);
                   
                   setSuccessModalConfig({
                       title: 'Zap Transfer Successful!',
                       desc: `Successfully swapped ${fromToken.symbol} and sent ${toToken.symbol} to recipient.${receiptNote}`,
+                      btnText: 'Close'
+                  });
+              } else if (mode === 'transfer') {
+                  setAmountIn('');
+                  setQuote(null);
+                  setSuccessModalConfig({
+                      title: 'Transfer Successful!',
+                      desc: `Successfully sent ${amountIn} ${fromToken?.symbol} to recipient.${receiptNote}`,
                       btnText: 'Close'
                   });
               } else {
@@ -800,11 +786,11 @@ export default function SwapPage() {
               }
 
               setTxWaitMessage('');
-              refetchBalance();
+              refetchBalance(); // Refresh balance after swap
               setHistoryRefreshTrigger(prev => prev + 1); // Trigger history refresh
               setShowSuccessModal(true);
 
-              // Confetti Effect
+              // 🎉 Confetti Effect
               triggerConfetti();
             }, 2000);
           });
@@ -848,7 +834,7 @@ export default function SwapPage() {
 
   // Calculate price impact
   const calculatePriceImpact = () => {
-    if (!effectiveQuote || !amountIn || parseFloat(amountIn) <= 0) return null;
+    if (!effectiveQuote || !amountIn || parseFloat(amountIn) <= 0 || !toToken) return null;
 
     // Price Impact Calculation
     // Compares the theoretical output (based on spot price) vs actual output (based on pool depth)
@@ -869,30 +855,17 @@ export default function SwapPage() {
 
   // Generate popular pairs based on selected fromToken
   const getPopularPairs = () => {
-    const pairs: Array<{ from: string; to: string }> = [];
-    const availableTokens = TOKENS_LIST.filter(t => t.symbol !== fromToken.symbol);
+    // Return empty array if token list is not loaded yet
+    if (!TOKENS_LIST.length || !fromToken) return [];
 
-    availableTokens.forEach(token => {
-      // 🛡️ Filter pairs based on available pools
-      // On Testnet, mostly SUI pairs exist. 
-      // Mainnet has more pairs (SUI-USDC, SUI-CETUS, USDC-CETUS).
-      
-      let isValidPair = false;
+    const pairs: { from: string; to: string }[] = [];
+    const targets = ['USDC', 'SUI', 'CETUS'];
 
-      if (SUI_NETWORK === 'mainnet') {
-          // Mainnet Rules: 
-          // 1. SUI pairs with everything
-          // 2. USDC pairs with CETUS
-          const isSuiPair = fromToken.symbol === 'SUI' || token.symbol === 'SUI';
-          const isUsdcCetus = (fromToken.symbol === 'USDC' && token.symbol === 'CETUS') || (fromToken.symbol === 'CETUS' && token.symbol === 'USDC');
-          isValidPair = isSuiPair || isUsdcCetus;
-      } else {
-          // Testnet Rules:
-          // Only SUI pairs are reliably supported via direct pools
-          isValidPair = fromToken.symbol === 'SUI' || token.symbol === 'SUI';
-      }
-
-      if (isValidPair) {
+    targets.forEach((target) => {
+      // Find the target token in the dynamic list
+      const token = TOKENS_LIST.find(t => t.symbol === target);
+      // Add pair if target exists and is not the same as fromToken
+      if (token && token.symbol !== fromToken.symbol) {
          pairs.push({ from: fromToken.symbol, to: token.symbol });
       }
     });
@@ -900,7 +873,7 @@ export default function SwapPage() {
     return pairs;
   };
 
-  const outputAmount = effectiveQuote
+  const outputAmount = effectiveQuote && toToken
     ? (Number(effectiveQuote.amountOut) / Math.pow(10, toToken.decimals)).toFixed(4)
     : '---';
 
@@ -1063,7 +1036,7 @@ export default function SwapPage() {
         <div className="p-6 space-y-6">
 
           {/* Quick Pair Selector */}
-          {currentAddress && (
+          {currentAddress && fromToken && (
             <div className="bg-gradient-to-r from-blue-50 to-indigo-50 p-3 rounded-lg border border-blue-200">
               <div className="text-xs font-semibold text-gray-600 mb-2">Popular Pairs with {fromToken.symbol}:</div>
               <div className="flex flex-wrap gap-2">
@@ -1084,44 +1057,16 @@ export default function SwapPage() {
           )}
 
           {/* From Token */}
-          <div className="bg-gray-50 p-4 rounded-xl border border-gray-100 focus-within:ring-2 focus-within:ring-blue-100 transition-all">
-            <div className="flex justify-between mb-2">
-              <span className="text-sm font-medium text-gray-500">You Pay</span>
-              <div className="text-sm text-gray-500 flex gap-2 items-center">
-                 <Wallet className="w-3 h-3" />
-                 <span>{formattedBalance}</span>
-                 {currentAddress && (
-                   <button
-                     onClick={handleMax}
-                     className="text-blue-600 font-bold hover:text-blue-700 text-xs bg-blue-50 px-2 py-0.5 rounded ml-1 transition-colors"
-                   >
-                     MAX
-                   </button>
-                 )}
-              </div>
-            </div>
-            <div className="flex gap-3 items-center">
-              <input 
-                type="number" 
-                placeholder="0.0" 
-                value={amountIn}
-                onChange={(e) => setAmountIn(e.target.value)}
-                className="bg-transparent text-3xl font-bold text-gray-800 w-full outline-none placeholder-gray-300"
-              />
-              <div className="relative">
-                <select 
-                  value={fromToken.symbol}
-                  onChange={(e) => setFromToken(TOKENS_LIST.find(t => t.symbol === e.target.value) || TOKENS_LIST[0])}
-                  className="appearance-none bg-white pl-3 pr-8 py-2 rounded-xl font-bold shadow-sm border border-gray-200 cursor-pointer hover:border-blue-300 transition-colors focus:outline-none focus:border-blue-500"
-                >
-                  {TOKENS_LIST.map(t => <option key={t.symbol} value={t.symbol}>{t.icon} {t.symbol}</option>)}
-                </select>
-                <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2 text-gray-500">
-                  <svg className="fill-current h-4 w-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path d="M9.293 12.95l.707.707L15.657 8l-1.414-1.414L10 10.828 5.757 6.586 4.343 8z"/></svg>
-                </div>
-              </div>
-            </div>
-          </div>
+          <TokenInput
+            label="You Pay"
+            amount={amountIn}
+            setAmount={setAmountIn}
+            token={fromToken}
+            setToken={(t) => setFromToken(t)}
+            tokensList={TOKENS_LIST}
+            balance={formattedBalance}
+            onMax={currentAddress ? handleMax : undefined}
+          />
 
           {/* Swap Icon */}
           <div className="flex justify-center -my-5 relative z-10">
@@ -1139,29 +1084,16 @@ export default function SwapPage() {
 
           {/* To Token (Swap Mode) or Recipient (Transfer Mode) */}
           {mode === 'swap' ? (
-            <div className="bg-gray-50 p-4 rounded-xl border border-gray-100">
-              <div className="flex justify-between mb-2">
-                <span className="text-sm font-medium text-gray-500">You Receive</span>
-                {effectiveQuote && <span className="text-xs text-green-600 font-medium bg-green-50 px-2 py-0.5 rounded">Best Price</span>}
-              </div>
-              <div className="flex gap-3 items-center">
-                <div className={`text-3xl font-bold w-full ${loading ? 'text-gray-300' : 'text-gray-800'}`}>
-                  {loading ? 'Searching...' : outputAmount}
-                </div>
-                <div className="relative">
-                  <select 
-                    value={toToken.symbol}
-                    onChange={(e) => setToToken(TOKENS_LIST.find(t => t.symbol === e.target.value) || TOKENS_LIST[1])}
-                    className="appearance-none bg-white pl-3 pr-8 py-2 rounded-xl font-bold shadow-sm border border-gray-200 cursor-pointer hover:border-blue-300 transition-colors focus:outline-none focus:border-blue-500"
-                  >
-                    {TOKENS_LIST.map(t => <option key={t.symbol} value={t.symbol}>{t.icon} {t.symbol}</option>)}
-                  </select>
-                  <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2 text-gray-500">
-                    <svg className="fill-current h-4 w-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path d="M9.293 12.95l.707.707L15.657 8l-1.414-1.414L10 10.828 5.757 6.586 4.343 8z"/></svg>
-                  </div>
-                </div>
-              </div>
-            </div>
+            <TokenInput
+              label="You Receive"
+              amount={outputAmount}
+              token={toToken}
+              setToken={(t) => setToToken(t)}
+              tokensList={TOKENS_LIST}
+              readOnly={true}
+              loading={loading}
+              showBestPriceBadge={!!effectiveQuote}
+            />
           ) : (
             <div className="space-y-4">
               {/* Recipient Input */}
@@ -1182,7 +1114,7 @@ export default function SwapPage() {
               <div className="bg-gray-50 p-4 rounded-xl border border-gray-100 transition-all">
                 <div className="flex justify-between mb-2">
                   <span className="text-sm font-medium text-gray-500">Recipient Receives</span>
-                  {fromToken.symbol !== toToken.symbol && (
+                  {fromToken && toToken && fromToken.symbol !== toToken.symbol && (
                      <span className="text-xs text-purple-600 font-bold bg-purple-100 px-2 py-0.5 rounded animate-pulse">
                         Zap Mode (Swap + Send)
                      </span>
@@ -1190,7 +1122,7 @@ export default function SwapPage() {
                 </div>
                 <div className="flex gap-3 items-center">
                    {/* If Zap Mode, show estimated amount */}
-                   {fromToken.symbol !== toToken.symbol ? (
+                   {fromToken && toToken && fromToken.symbol !== toToken.symbol ? (
                        <div className={`text-xl font-bold w-full ${loading ? 'text-gray-300' : 'text-gray-800'}`}>
                          {loading ? 'Estimating...' : `≈ ${outputAmount}`}
                        </div>
@@ -1201,15 +1133,17 @@ export default function SwapPage() {
                    )}
                    
                    <div className="relative">
-                    <select 
-                      value={toToken.symbol}
-                      onChange={(e) => setToToken(TOKENS_LIST.find(t => t.symbol === e.target.value) || TOKENS_LIST[1])}
-                      className={`appearance-none bg-white pl-3 pr-8 py-2 rounded-xl font-bold shadow-sm border cursor-pointer transition-colors focus:outline-none focus:border-blue-500 ${
-                        fromToken.symbol !== toToken.symbol ? 'border-purple-300 text-purple-700' : 'border-gray-200'
-                      }`}
-                    >
-                      {TOKENS_LIST.map(t => <option key={t.symbol} value={t.symbol}>{t.icon} {t.symbol}</option>)}
-                    </select>
+                    {toToken && (
+                      <select 
+                        value={toToken.symbol}
+                        onChange={(e) => setToToken(TOKENS_LIST.find(t => t.symbol === e.target.value) || TOKENS_LIST[1])}
+                        className={`appearance-none bg-white pl-3 pr-8 py-2 rounded-xl font-bold shadow-sm border cursor-pointer transition-colors focus:outline-none focus:border-blue-500 ${
+                          fromToken && toToken && fromToken.symbol !== toToken.symbol ? 'border-purple-300 text-purple-700' : 'border-gray-200'
+                        }`}
+                      >
+                        {TOKENS_LIST.map(t => <option key={t.symbol} value={t.symbol}>{t.icon} {t.symbol}</option>)}
+                      </select>
+                    )}
                     <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2 text-gray-500">
                       <svg className="fill-current h-4 w-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path d="M9.293 12.95l.707.707L15.657 8l-1.414-1.414L10 10.828 5.757 6.586 4.343 8z"/></svg>
                     </div>
@@ -1249,7 +1183,7 @@ export default function SwapPage() {
                   <div className="flex justify-between">
                     <span className="text-gray-600">Type:</span>
                     <span className="font-medium text-gray-800">
-                      {effectiveQuote.source === 'aggregator' ? 'Multi-hop via Cetus Aggregator' : `Direct ${fromToken.symbol}-${toToken.symbol} Pool`}
+                      {effectiveQuote.source === 'aggregator' ? 'Multi-hop via Cetus Aggregator' : `Direct ${fromToken?.symbol}-${toToken?.symbol} Pool`}
                     </span>
                   </div>
 
@@ -1257,7 +1191,7 @@ export default function SwapPage() {
                   <div className="flex justify-between">
                     <span className="text-gray-600">Output:</span>
                     <span className="font-medium text-gray-800">
-                      {(Number(effectiveQuote.amountOut) / Math.pow(10, toToken.decimals)).toFixed(6)} {toToken.symbol}
+                      {(Number(effectiveQuote.amountOut) / Math.pow(10, toToken?.decimals || 9)).toFixed(6)} {toToken?.symbol}
                     </span>
                   </div>
 
@@ -1266,7 +1200,7 @@ export default function SwapPage() {
                     <div className="flex justify-between">
                       <span className="text-gray-600">Est. Fee:</span>
                       <span className="font-medium text-gray-800">
-                        {effectiveQuote.estimatedFee > 0 ? `${effectiveQuote.estimatedFee} ${toToken.symbol}` : 'Included'}
+                        {effectiveQuote.estimatedFee > 0 ? `${effectiveQuote.estimatedFee} ${toToken?.symbol}` : 'Included'}
                       </span>
                     </div>
                   )}
@@ -1332,8 +1266,8 @@ export default function SwapPage() {
                       </div>
                       <div className="text-[11px] mt-1">
                         {effectiveQuote.comparison.better === 'aggregator'
-                          ? `+${(Number(effectiveQuote.comparison.savingsAbs) / Math.pow(10, toToken.decimals)).toFixed(6)} ${toToken.symbol} (~${effectiveQuote.comparison.savingsPct.toFixed(2)}%)`
-                          : `-${(Number(effectiveQuote.comparison.savingsAbs) / Math.pow(10, toToken.decimals)).toFixed(6)} ${toToken.symbol} (~${effectiveQuote.comparison.savingsPct.toFixed(2)}%)`
+                          ? `+${(Number(effectiveQuote.comparison.savingsAbs) / Math.pow(10, toToken?.decimals || 9)).toFixed(6)} ${toToken?.symbol} (~${effectiveQuote.comparison.savingsPct.toFixed(2)}%)`
+                          : `-${(Number(effectiveQuote.comparison.savingsAbs) / Math.pow(10, toToken?.decimals || 9)).toFixed(6)} ${toToken?.symbol} (~${effectiveQuote.comparison.savingsPct.toFixed(2)}%)`
                         }
                       </div>
                     </div>
@@ -1479,7 +1413,7 @@ export default function SwapPage() {
                             </span>
                           </div>
                           <span className="text-sm font-bold text-gray-800">
-                            {(Number(route.amountOut) / Math.pow(10, toToken.decimals)).toFixed(6)} {toToken.symbol}
+                            {(Number(route.amountOut) / Math.pow(10, toToken?.decimals || 9)).toFixed(6)} {toToken?.symbol}
                           </span>
                         </div>
                       </button>
@@ -1542,7 +1476,7 @@ export default function SwapPage() {
                   parseFloat(amountIn) <= 0 || 
                   isHighPriceImpact ||
                   (mode === 'swap' && !effectiveQuote) ||
-                  (mode === 'transfer' && fromToken.symbol !== toToken.symbol && !effectiveQuote) ||
+                  (mode === 'transfer' && fromToken && toToken && fromToken.symbol !== toToken.symbol && !effectiveQuote) ||
                   (mode === 'transfer' && !isValidSuiAddress(recipientAddress))
               }
               className={`w-full py-4 mt-4 rounded-xl font-bold text-lg transition-all duration-300 transform hover:scale-[1.02] active:scale-[0.98] shadow-lg ${
@@ -1564,83 +1498,19 @@ export default function SwapPage() {
           )}
 
       {/* Review Modal */}
-      {showReviewModal && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[100] animate-in fade-in duration-200">
-            <div className="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-sm m-4 transform transition-all scale-100">
-                <h3 className="text-xl font-bold mb-4 text-gray-800">Review Transaction</h3>
-                
-                <div className="space-y-4">
-                    {/* From */}
-                    <div className="flex justify-between items-center p-3 bg-gray-50 rounded-lg">
-                        <span className="text-gray-500 text-sm">You Pay</span>
-                        <div className="text-right">
-                            <div className="font-bold text-lg">{amountIn} {fromToken.symbol}</div>
-                        </div>
-                    </div>
-
-                    {/* Arrow */}
-                    <div className="flex justify-center text-gray-400">
-                        <ArrowDownUp className="w-5 h-5" />
-                    </div>
-
-                    {/* To */}
-                    <div className="flex justify-between items-center p-3 bg-gray-50 rounded-lg">
-                        <span className="text-gray-500 text-sm">You Receive</span>
-                        <div className="text-right">
-                            <div className="font-bold text-lg text-green-600">
-                                {effectiveQuote ? (Number(effectiveQuote.amountOut) / Math.pow(10, toToken.decimals)).toFixed(4) : '---'} {toToken.symbol}
-                            </div>
-                            {mode === 'transfer' && fromToken.symbol !== toToken.symbol && (
-                                <div className="text-xs text-purple-600 font-bold mt-1">Zap Mode Active ⚡</div>
-                            )}
-                        </div>
-                    </div>
-
-                    {/* Recipient (Only for Transfer) */}
-                    {mode === 'transfer' && (
-                        <div className="p-3 bg-purple-50 border border-purple-100 rounded-lg">
-                            <div className="text-xs text-purple-800 font-bold mb-1">Send to Recipient</div>
-                            <div className="font-mono text-xs break-all text-gray-700">
-                                {recipientAddress}
-                            </div>
-                        </div>
-                    )}
-
-                    {/* Details */}
-                    <div className="pt-4 border-t border-gray-100 space-y-2 text-sm">
-                        <div className="flex justify-between">
-                            <span className="text-gray-500">Network Cost</span>
-                            <span className="font-medium text-gray-800">{gasEstimate} SUI</span>
-                        </div>
-                        <div className="flex justify-between">
-                            <span className="text-gray-500">Max Slippage</span>
-                            <span className="font-medium text-gray-800">{slippage}%</span>
-                        </div>
-                    </div>
-
-                    {/* Buttons */}
-                    <div className="flex gap-3 mt-6">
-                        <button 
-                            onClick={() => setShowReviewModal(false)}
-                            className="flex-1 py-3 rounded-xl font-bold text-gray-600 bg-gray-100 hover:bg-gray-200 transition-colors"
-                        >
-                            Cancel
-                        </button>
-                        <button 
-                            onClick={handleConfirmAction}
-                            className={`flex-1 py-3 rounded-xl font-bold text-white shadow-lg transition-transform active:scale-95 ${
-                                mode === 'swap' 
-                                ? 'bg-gradient-to-r from-blue-600 to-indigo-600 hover:shadow-blue-500/30' 
-                                : 'bg-gradient-to-r from-purple-600 to-pink-600 hover:shadow-purple-500/30'
-                            }`}
-                        >
-                            Confirm {mode === 'swap' ? 'Swap' : 'Send'}
-                        </button>
-                    </div>
-                </div>
-            </div>
-        </div>
-      )}
+      <ReviewModal
+        isOpen={showReviewModal}
+        onClose={() => setShowReviewModal(false)}
+        onConfirm={handleConfirmAction}
+        pendingAction={pendingAction}
+        amountIn={amountIn}
+        fromToken={fromToken}
+        toToken={toToken}
+        quote={effectiveQuote}
+        recipientAddress={recipientAddress}
+        gasEstimate={gasEstimate}
+        slippage={slippage}
+      />
           
           {/* Stepper Indicator */}
           {swapStatus !== 'idle' && (
@@ -1697,74 +1567,16 @@ export default function SwapPage() {
       )}
 
       {/* Success Modal */}
-      {showSuccessModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
-          <div className="bg-white rounded-2xl shadow-2xl p-8 max-w-sm w-full text-center transform transition-all scale-100 animate-in zoom-in-95 duration-200">
-             <div className="mx-auto flex items-center justify-center h-16 w-16 rounded-full bg-green-100 mb-6">
-                <CheckCircle2 className="h-10 w-10 text-green-600" />
-             </div>
-             <h3 className="text-2xl font-bold text-gray-900 mb-2">{successModalConfig.title}</h3>
-             <p className="text-gray-500 mb-6">{successModalConfig.desc}</p>
-             
-             {lastTxDigest && (
-               <a
-                 href={`${SUI_NETWORK === 'mainnet' ? 'https://suiscan.xyz/mainnet' : 'https://suiscan.xyz/testnet'}/tx/${lastTxDigest}`}
-                 target="_blank"
-                 rel="noopener noreferrer"
-                 className="block bg-gray-50 hover:bg-blue-50 rounded-lg p-3 mb-6 text-xs text-blue-600 hover:text-blue-700 break-all font-mono transition-colors cursor-pointer"
-               >
-                 Tx: {lastTxDigest}
-               </a>
-             )}
-
-             {lastReceiptId && (
-               <div className="mb-6 space-y-2">
-                 <a
-                   href={`/receipt/${lastReceiptId}`}
-                   target="_blank"
-                   rel="noopener noreferrer"
-                   className="block bg-emerald-50 hover:bg-emerald-100 rounded-lg p-3 text-xs text-emerald-700 break-all font-mono transition-colors cursor-pointer"
-                 >
-                   Receipt: {lastReceiptId}
-                 </a>
-                 <div className="flex gap-2">
-                   <button
-                     onClick={() => {
-                       const link = `${window.location.origin}/receipt/${lastReceiptId}`;
-                       navigator.clipboard.writeText(link).catch(() => {});
-                     }}
-                     className="flex-1 bg-white border border-gray-200 hover:bg-gray-50 text-gray-700 text-xs font-semibold py-2 rounded-lg transition-colors"
-                   >
-                     Copy Receipt Link
-                   </button>
-                   <a
-                     href={`${SUI_NETWORK === 'mainnet' ? 'https://suiscan.xyz/mainnet' : 'https://suiscan.xyz/testnet'}/object/${lastReceiptId}`}
-                     target="_blank"
-                     rel="noopener noreferrer"
-                     className="flex-1 bg-white border border-gray-200 hover:bg-gray-50 text-gray-700 text-xs font-semibold py-2 rounded-lg text-center transition-colors"
-                   >
-                     View on Explorer
-                   </a>
-                 </div>
-               </div>
-             )}
-
-             <button 
-               onClick={() => {
-                   setShowSuccessModal(false);
-                   if (successModalConfig.btnText === 'Proceed to Transfer') {
-                       // Logic to open Transfer Review Modal immediately?
-                       // Or just let user click Transfer button.
-                       // Just closing is enough as state is updated.
-                   }
-               }}
-               className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-xl transition-colors shadow-lg shadow-blue-500/30"
-             >
-               {successModalConfig.btnText}
-             </button>
-          </div>
-        </div>
-      )}
+      <SuccessModal
+        isOpen={showSuccessModal}
+        onClose={() => setShowSuccessModal(false)}
+        title={successModalConfig.title}
+        desc={successModalConfig.desc}
+        btnText={successModalConfig.btnText}
+        lastTxDigest={lastTxDigest}
+        lastReceiptId={lastReceiptId}
+        receiptError={receiptError}
+      />
 
     </div>
   );

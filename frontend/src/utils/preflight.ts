@@ -7,6 +7,7 @@ export type PreflightResult = {
   ok: boolean;
   reason?: string;
   gasUsed?: string;
+  gasEstimate?: bigint;
   usedUrl?: string;
   fallback?: boolean;
 };
@@ -21,12 +22,17 @@ export const preflightTransaction = async (
     const status = result?.effects?.status;
     if (status?.status === 'success') {
       const gasUsed = result?.effects?.gasUsed;
-      const totalGas = gasUsed
-        ? BigInt(gasUsed.computationCost) + BigInt(gasUsed.storageCost) - BigInt(gasUsed.storageRebate)
-        : BigInt(0);
+      const computationCost = BigInt(gasUsed?.computationCost || 0);
+      const storageCost = BigInt(gasUsed?.storageCost || 0);
+      const storageRebate = BigInt(gasUsed?.storageRebate || 0);
+      
+      const netGas = computationCost + storageCost - storageRebate;
+      const estimatedBudget = computationCost + storageCost; // Budget needs to cover full cost upfront
+
       return {
         ok: true,
-        gasUsed: (Number(totalGas) / 1e9).toFixed(4),
+        gasUsed: (Number(netGas) / 1e9).toFixed(4),
+        gasEstimate: estimatedBudget,
         usedUrl,
         fallback,
       };

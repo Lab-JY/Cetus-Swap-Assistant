@@ -17,7 +17,9 @@
       "Bash(xargs kill:*)",
       "Bash(npm run lint)",
       "WebFetch(domain:raw.githubusercontent.com)",
-      "Bash(taskkill:*)"
+      "Bash(taskkill:*)",
+      "Bash(claude plugin --help:*)",
+      "Bash(claude plugin:*)"
     ]
   }
 }
