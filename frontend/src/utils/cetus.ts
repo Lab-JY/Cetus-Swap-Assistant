@@ -6,6 +6,7 @@ import { SuiClient } from "@mysten/sui/client";
 import { normalizeSuiAddress, isValidSuiAddress } from "@mysten/sui/utils";
 import BN from "bn.js";
 import { TOKENS, SUI_NETWORK, POOL_IDS, CETUS_SWAP_PACKAGE_ID, CETUS_PARTNER_ID, ENABLE_RECEIPTS } from "./config";
+import { getHealthySuiClient } from "./rpc";
 
 export { SUI_NETWORK, CETUS_PARTNER_ID, ENABLE_RECEIPTS }; // Re-export for frontend use
 
@@ -354,6 +355,8 @@ const TOKEN_ICON_MAP: Record<string, string> = {
     CETUS: '🌊',
     wUSDC: '🌉',
     MEME: '🎭',
+    IDOL_APPLE: '🍎',
+    IDOL_DGRAN: '🎪',
 };
 
 const TOKEN_NAME_MAP: Record<string, string> = {
@@ -362,25 +365,32 @@ const TOKEN_NAME_MAP: Record<string, string> = {
     CETUS: 'Cetus Token',
     wUSDC: 'Wormhole USDC',
     MEME: 'Meme Token',
+    IDOL_APPLE: 'Idol Apple',
+    IDOL_DGRAN: 'Idol Dgran',
 };
 
 const deriveSymbolFromType = (coinType: string) => {
     const normalized = normalizeType(coinType);
     if (normalizeType(TOKENS.wUSDC) === normalized) return 'wUSDC';
+    if (coinType.includes('::meme_token::MEME_TOKEN')) return 'MEME';
+    if (coinType.includes('::idol_apple')) return 'IDOL_APPLE';
+    if (coinType.includes('::idol_dgran')) return 'IDOL_DGRAN';
     const parts = coinType.split('::');
     return parts[parts.length - 1] || 'UNKNOWN';
 };
 
 const buildTokenInfo = (coinType: string): TokenInfo => {
-    const symbol = deriveSymbolFromType(coinType);
     const normalized = normalizeType(coinType);
     const tokenInfo = poolsCache?.tokenInfoByType.get(normalized);
+    const derivedSymbol = deriveSymbolFromType(coinType);
+    const preferDerived = ['MEME', 'IDOL_APPLE', 'IDOL_DGRAN', 'wUSDC'].includes(derivedSymbol);
+    const symbol = preferDerived ? derivedSymbol : (tokenInfo?.symbol || derivedSymbol);
     return {
-        symbol: tokenInfo?.symbol || symbol,
+        symbol,
         name: tokenInfo?.name || TOKEN_NAME_MAP[symbol] || symbol,
         type: coinType,
         decimals: typeof tokenInfo?.decimals === 'number' ? tokenInfo.decimals : getCoinDecimals(coinType),
-        icon: TOKEN_ICON_MAP[tokenInfo?.symbol || symbol] || '🪙',
+        icon: TOKEN_ICON_MAP[symbol] || '🪙',
     };
 };
 
@@ -536,8 +546,27 @@ export async function getSwapQuote(
     userAddress: string,
     byAmountIn: boolean = true
 ) {
-    const amount = new BN(amountIn);
     const meta: QuoteMeta = {};
+    const amountRaw = typeof amountIn === 'number' ? Math.trunc(amountIn).toString() : String(amountIn).trim();
+    if (!/^\d+$/.test(amountRaw) || amountRaw === '0') {
+        return {
+            error: true,
+            errorMessage: 'Invalid amount. Use a positive integer string in base units.',
+            source: 'error',
+            meta,
+        };
+    }
+    let amount: BN;
+    try {
+        amount = new BN(amountRaw);
+    } catch {
+        return {
+            error: true,
+            errorMessage: 'Invalid amount. Use a positive integer string in base units.',
+            source: 'error',
+            meta,
+        };
+    }
 
     // Set sender address for CLMM SDK
     if (userAddress) {
@@ -548,114 +577,115 @@ export async function getSwapQuote(
     let aggregatorQuote: any | null = null;
     let directQuote: Awaited<ReturnType<typeof getDirectPoolQuote>> | null = null;
 
-    const aggStart = Date.now();
-    try {
-        const routerData = await aggregator.findRouters({
-            from: fromCoinType,
-            target: toCoinType,
-            amount: amount,
-            byAmountIn: byAmountIn,
-        });
-        meta.aggregatorLatencyMs = Date.now() - aggStart;
+    const aggPromise = (async () => {
+        const aggStart = Date.now();
+        try {
+            const routerData = await fetchAggregatorRouters(fromCoinType, toCoinType, amount, byAmountIn);
+            meta.aggregatorLatencyMs = Date.now() - aggStart;
 
-        const normalizedFrom = normalizeType(fromCoinType);
-        const normalizedTo = normalizeType(toCoinType);
-        const validPaths = routerData?.paths?.filter((path: any) => {
-            const endpoints = getPathEndpoints(path);
-            return normalizeType(endpoints.from) === normalizedFrom
-                && normalizeType(endpoints.to) === normalizedTo;
-        }) || [];
-
-        if (routerData && validPaths.length > 0) {
-            const sortedPaths = validPaths.sort((a: any, b: any) => toBn(b.amountOut).cmp(toBn(a.amountOut)));
-            const routes = sortedPaths.map((path: any, idx: number) => {
+            const normalizedFrom = normalizeType(fromCoinType);
+            const normalizedTo = normalizeType(toCoinType);
+            const validPaths = routerData?.paths?.filter((path: any) => {
                 const endpoints = getPathEndpoints(path);
-                const pathFrom = endpoints.from || path.from;
-                const pathTo = endpoints.to || path.target || path.to;
-                const extractedSteps = extractRouteSteps(path);
-                const fallbackSteps: RouteStep[] = pathFrom && pathTo ? [{
-                    from: pathFrom,
-                    to: pathTo,
-                    fromSymbol: getTokenSymbol(pathFrom),
-                    toSymbol: getTokenSymbol(pathTo),
-                    provider: String(path.provider || 'Cetus Aggregator'),
-                    feeRate: path.feeRate,
-                }] : [];
-                const pathSteps = extractedSteps.length > 0 ? extractedSteps : fallbackSteps;
+                return normalizeType(endpoints.from) === normalizedFrom
+                    && normalizeType(endpoints.to) === normalizedTo;
+            }) || [];
 
-                return {
-                    id: idx,
-                    amountOut: new BN(path.amountOut),
+            if (routerData && validPaths.length > 0) {
+                const sortedPaths = validPaths.sort((a: any, b: any) => toBn(b.amountOut).cmp(toBn(a.amountOut)));
+                const routes = sortedPaths.map((path: any, idx: number) => {
+                    const endpoints = getPathEndpoints(path);
+                    const pathFrom = endpoints.from || path.from;
+                    const pathTo = endpoints.to || path.target || path.to;
+                    const extractedSteps = extractRouteSteps(path);
+                    const fallbackSteps: RouteStep[] = pathFrom && pathTo ? [{
+                        from: pathFrom,
+                        to: pathTo,
+                        fromSymbol: getTokenSymbol(pathFrom),
+                        toSymbol: getTokenSymbol(pathTo),
+                        provider: String(path.provider || 'Cetus Aggregator'),
+                        feeRate: path.feeRate,
+                    }] : [];
+                    const pathSteps = extractedSteps.length > 0 ? extractedSteps : fallbackSteps;
+
+                    return {
+                        id: idx,
+                        amountOut: new BN(path.amountOut),
+                        estimatedFee: 0,
+                        router: { path: [path] },
+                        source: 'aggregator',
+                        pathSteps,
+                        hopCount: pathSteps.length,
+                        rawSwapResult: { path: [path] }
+                    };
+                });
+
+                const bestPath: any = sortedPaths[0];
+                const bestEndpoints = getPathEndpoints(bestPath);
+                const bestFrom = bestEndpoints.from || bestPath.from;
+                const bestTo = bestEndpoints.to || bestPath.target || bestPath.to;
+                const bestSteps = extractRouteSteps(bestPath);
+                const routeSteps: RouteStep[] = bestSteps.length > 0 ? bestSteps : [{
+                    from: bestFrom,
+                    to: bestTo,
+                    fromSymbol: getTokenSymbol(bestFrom),
+                    toSymbol: getTokenSymbol(bestTo),
+                    provider: String(bestPath.provider || 'Cetus Aggregator'),
+                    feeRate: bestPath.feeRate,
+                }];
+
+                const paths = sortedPaths.map((path: any, idx: number) => {
+                    const endpoints = getPathEndpoints(path);
+                    const pathFrom = endpoints.from || path.from;
+                    const pathTo = endpoints.to || path.target || path.to;
+                    const pathSteps = extractRouteSteps(path);
+                    return {
+                        label: buildPathLabel(pathSteps, { from: pathFrom, to: pathTo }, path.provider || 'Cetus'),
+                        steps: Array.isArray(path.path) ? path.path : (Array.isArray(path.steps) ? path.steps : [path]),
+                        id: idx,
+                    };
+                });
+
+                const normalizedAmountOut = typeof bestPath.amountOut?.toString === 'function'
+                    ? bestPath.amountOut.toString()
+                    : bestPath.amountOut;
+
+                const defaultRoute = routes[0];
+                aggregatorQuote = {
+                    amountOut: normalizedAmountOut,
                     estimatedFee: 0,
-                    router: { path: [path] },
+                    router: { ...routerData, paths: sortedPaths },
                     source: 'aggregator',
-                    pathSteps,
-                    hopCount: pathSteps.length,
-                    rawSwapResult: { path: [path] }
+                    routes: routes,
+                    paths,
+                    selectedRouteId: defaultRoute?.id ?? 0, // Best route is first after sorting
+                    selectedRoute: defaultRoute,
+                    rawSwapResult: { ...routerData, paths: sortedPaths },
+                    fullRouterData: routerData,
+                    routeDetails: buildRouteDetails('aggregator', routeSteps),
                 };
-            });
-
-            const bestPath: any = sortedPaths[0];
-            const bestEndpoints = getPathEndpoints(bestPath);
-            const bestFrom = bestEndpoints.from || bestPath.from;
-            const bestTo = bestEndpoints.to || bestPath.target || bestPath.to;
-            const bestSteps = extractRouteSteps(bestPath);
-            const routeSteps: RouteStep[] = bestSteps.length > 0 ? bestSteps : [{
-                from: bestFrom,
-                to: bestTo,
-                fromSymbol: getTokenSymbol(bestFrom),
-                toSymbol: getTokenSymbol(bestTo),
-                provider: String(bestPath.provider || 'Cetus Aggregator'),
-                feeRate: bestPath.feeRate,
-            }];
-
-            const paths = sortedPaths.map((path: any, idx: number) => {
-                const endpoints = getPathEndpoints(path);
-                const pathFrom = endpoints.from || path.from;
-                const pathTo = endpoints.to || path.target || path.to;
-                const pathSteps = extractRouteSteps(path);
-                return {
-                    label: buildPathLabel(pathSteps, { from: pathFrom, to: pathTo }, path.provider || 'Cetus'),
-                    steps: Array.isArray(path.path) ? path.path : (Array.isArray(path.steps) ? path.steps : [path]),
-                    id: idx,
-                };
-            });
-
-            const normalizedAmountOut = typeof bestPath.amountOut?.toString === 'function'
-                ? bestPath.amountOut.toString()
-                : bestPath.amountOut;
-
-            const defaultRoute = routes[0];
-            aggregatorQuote = {
-                amountOut: normalizedAmountOut,
-                estimatedFee: 0,
-                router: { ...routerData, paths: sortedPaths },
-                source: 'aggregator',
-                routes: routes,
-                paths,
-                selectedRouteId: defaultRoute?.id ?? 0, // Best route is first after sorting
-                selectedRoute: defaultRoute,
-                rawSwapResult: { ...routerData, paths: sortedPaths },
-                fullRouterData: routerData,
-                routeDetails: buildRouteDetails('aggregator', routeSteps),
-            };
-        } else {
-            aggregatorError = 'No trading route found for this token pair';
+            } else {
+                aggregatorError = 'No trading route found for this token pair';
+            }
+        } catch (error) {
+            meta.aggregatorLatencyMs = Date.now() - aggStart;
+            aggregatorError = error instanceof Error ? error.message : String(error);
+            console.warn("⚠️ Aggregator failed, trying direct pool fallback...", error);
         }
-    } catch (error) {
-        meta.aggregatorLatencyMs = Date.now() - aggStart;
-        aggregatorError = error instanceof Error ? error.message : String(error);
-        console.warn("⚠️ Aggregator failed, trying direct pool fallback...", error);
-    }
+    })();
 
-    const clmmStart = Date.now();
-    try {
-        directQuote = await getDirectPoolQuote(fromCoinType, toCoinType, amount, byAmountIn);
-        meta.clmmLatencyMs = Date.now() - clmmStart;
-    } catch (error) {
-        meta.clmmLatencyMs = Date.now() - clmmStart;
-        console.warn("⚠️ Direct pool quote failed...", error);
-    }
+    const clmmPromise = (async () => {
+        const clmmStart = Date.now();
+        try {
+            directQuote = await getDirectPoolQuote(fromCoinType, toCoinType, amount, byAmountIn);
+            meta.clmmLatencyMs = Date.now() - clmmStart;
+        } catch (error) {
+            meta.clmmLatencyMs = Date.now() - clmmStart;
+            console.warn("⚠️ Direct pool quote failed...", error);
+        }
+    })();
+
+    await Promise.all([aggPromise, clmmPromise]);
 
     if (aggregatorQuote) {
         const comparison = computeComparison(toBn(aggregatorQuote.amountOut), directQuote?.amountOut);
@@ -854,6 +884,68 @@ function adjustForSlippage(amount: BN, slippage: number, isMax: boolean): BN {
     }
 }
 
+const queryEventsViaProxy = async (eventType: string, limit: number) => {
+    if (!eventType || typeof window === 'undefined') {
+        return { data: [] };
+    }
+    try {
+        const res = await fetch(`/api/sui/events?eventType=${encodeURIComponent(eventType)}&limit=${limit}`);
+        if (!res.ok) {
+            const errorText = await res.text();
+            throw new Error(errorText || 'Proxy queryEvents failed');
+        }
+        return await res.json();
+    } catch (error) {
+        console.warn('❌ Proxy queryEvents failed', error);
+        return { data: [] };
+    }
+};
+
+const safeQueryEvents = async (client: any, query: any, limit: number) => {
+    if (client && typeof client.queryEvents === 'function') {
+        try {
+            return await client.queryEvents({ query, limit, order: 'descending' });
+        } catch (error) {
+            console.warn('⚠️ Primary queryEvents failed, attempting fallback RPC...', error);
+        }
+    }
+
+    try {
+        const { client: fallbackClient } = await getHealthySuiClient(SUI_NETWORK);
+        return await fallbackClient.queryEvents({ query, limit, order: 'descending' });
+    } catch (fallbackError) {
+        console.warn('⚠️ Fallback queryEvents failed, attempting proxy...', fallbackError);
+    }
+
+    const eventType = query?.MoveEventType || '';
+    return await queryEventsViaProxy(eventType, limit);
+};
+
+const fetchAggregatorRouters = async (
+    fromCoinType: string,
+    toCoinType: string,
+    amount: BN,
+    byAmountIn: boolean
+) => {
+    if (typeof window === 'undefined') {
+        return await aggregator.findRouters({
+            from: fromCoinType,
+            target: toCoinType,
+            amount,
+            byAmountIn,
+        });
+    }
+
+    const url = `/api/cetus/quote?from=${encodeURIComponent(fromCoinType)}&target=${encodeURIComponent(toCoinType)}&amount=${encodeURIComponent(amount.toString())}&byAmountIn=${byAmountIn}`;
+    const res = await fetch(url);
+    if (!res.ok) {
+        const errorText = await res.text();
+        throw new Error(errorText || 'Failed to fetch aggregator routes');
+    }
+    const payload = await res.json();
+    return payload?.data;
+};
+
 // 📊 Query History (Swap + Transfer)
 export async function getSwapHistory(
     suiClient: any,
@@ -866,16 +958,18 @@ export async function getSwapHistory(
         // console.log(`📊 Fetching history for ${normalizedUserAddress} using Package ID: ${CETUS_SWAP_PACKAGE_ID}`);
 
         // 1. Fetch Swap Events
-        const swapEventsPromise = suiClient.queryEvents({
-            query: { MoveEventType: `${CETUS_SWAP_PACKAGE_ID}::swap_helper::SwapEvent` },
-            limit: limit
-        });
+        const swapEventsPromise = safeQueryEvents(
+            suiClient,
+            { MoveEventType: `${CETUS_SWAP_PACKAGE_ID}::swap_helper::SwapEvent` },
+            limit
+        );
 
         // 2. Fetch Transfer Events
-        const transferEventsPromise = suiClient.queryEvents({
-            query: { MoveEventType: `${CETUS_SWAP_PACKAGE_ID}::swap_helper::TransferEvent` },
-            limit: limit
-        });
+        const transferEventsPromise = safeQueryEvents(
+            suiClient,
+            { MoveEventType: `${CETUS_SWAP_PACKAGE_ID}::swap_helper::TransferEvent` },
+            limit
+        );
 
         const [swapEvents, transferEvents] = await Promise.all([swapEventsPromise, transferEventsPromise]);
         
@@ -983,6 +1077,52 @@ export async function getSwapHistory(
     }
 }
 
+export type SwapEventRecord = {
+    sender: string;
+    fromCoin: string;
+    toCoin: string;
+    amountIn: string;
+    amountOut: string;
+    timestamp: number;
+    txDigest: string;
+};
+
+export async function getRecentSwapEvents(
+    suiClient: any,
+    limit: number = 50
+): Promise<SwapEventRecord[]> {
+    try {
+        const swapEvents = await safeQueryEvents(
+            suiClient,
+            { MoveEventType: `${CETUS_SWAP_PACKAGE_ID}::swap_helper::SwapEvent` },
+            limit
+        );
+
+        const events = Array.isArray(swapEvents?.data) ? swapEvents.data : [];
+        const records = events.map((event: any) => {
+            const data = event.parsedJson as any;
+            const timestamp = event.timestampMs ? Number(event.timestampMs) : Number(data?.timestamp || 0);
+            return {
+                sender: event.sender || data?.user || '',
+                fromCoin: data?.from_coin || '',
+                toCoin: data?.to_coin || '',
+                amountIn: data?.amount_in || '0',
+                amountOut: data?.amount_out || '0',
+                timestamp,
+                txDigest: event.id?.txDigest || ''
+            };
+        });
+
+        return records
+            .filter((record) => record.sender && record.fromCoin && record.toCoin)
+            .sort((a, b) => b.timestamp - a.timestamp)
+            .slice(0, limit);
+    } catch (error) {
+        console.error("❌ Error fetching recent swap events:", error);
+        return [];
+    }
+}
+
 // 🪙 Helper: Select and Prepare Coins for Transaction
 export async function selectAndPrepareCoins(
     suiClient: SuiClient,
@@ -1079,8 +1219,6 @@ export function applySelectedRoute(quote: any, selectedRouteId: number) {
 // Helper to get token symbol from coin type
 export function getTokenSymbol(coinType: string): string {
     const normalized = normalizeType(coinType);
-    const dynamicSymbol = poolsCache?.tokenInfoByType.get(normalized)?.symbol;
-    if (dynamicSymbol) return dynamicSymbol;
     if (coinType.includes('::sui::SUI')) return 'SUI';
     if (coinType.includes('::usdc::USDC')) return 'USDC';
     if (coinType.includes('::cetus::CETUS')) return 'CETUS';
@@ -1088,5 +1226,7 @@ export function getTokenSymbol(coinType: string): string {
     if (coinType.includes('::meme_token::MEME_TOKEN')) return 'MEME';
     if (coinType.includes('::idol_apple')) return 'IDOL_APPLE';
     if (coinType.includes('::idol_dgran')) return 'IDOL_DGRAN';
+    const dynamicSymbol = poolsCache?.tokenInfoByType.get(normalized)?.symbol;
+    if (dynamicSymbol) return dynamicSymbol;
     return 'UNKNOWN';
 }
