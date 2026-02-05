@@ -4,7 +4,8 @@ import { useState, useEffect, useCallback } from 'react';
 import { ConnectButton, useCurrentAccount, useSignAndExecuteTransaction, useSuiClient, useSuiClientQuery } from '@mysten/dapp-kit';
 import { Transaction } from '@mysten/sui/transactions';
 import { isValidSuiAddress } from '@mysten/sui/utils';
-import { SUI_COIN_TYPE, USDC_COIN_TYPE, CETUS_COIN_TYPE, WUSDC_COIN_TYPE, buildSimpleSwapTx, SUI_NETWORK, buildTransferTx, selectAndPrepareCoins, applySelectedRoute, ENABLE_RECEIPTS, getCetusPartnerInfo, getPartnerRefFeeAmounts, CETUS_PARTNER_ID, formatCoinAmount, getTokenSymbol } from '@/utils/cetus';
+import { SUI_COIN_TYPE, USDC_COIN_TYPE, CETUS_COIN_TYPE, WUSDC_COIN_TYPE, buildSimpleSwapTx, SUI_NETWORK, buildTransferTx, selectAndPrepareCoins, applySelectedRoute, ENABLE_RECEIPTS, getCetusPartnerInfo, getPartnerRefFeeAmounts, CETUS_PARTNER_ID, formatCoinAmount, getTokenSymbol, getDynamicTokenList } from '@/utils/cetus';
+import type { TokenInfo } from '@/utils/cetus';
 import { getQuoteWithCache } from '@/utils/quoteService';
 import { preflightTransaction } from '@/utils/preflight';
 import { getDerivedStats, recordTrade } from '@/utils/tradeStats';
@@ -17,21 +18,19 @@ import { getGoogleLoginUrl, clearZkLoginSession, signTransactionWithZkLogin } fr
 import confetti from 'canvas-confetti';
 import SwapHistory from '@/components/SwapHistory';
 
-const MAINNET_TOKENS = [
+const MAINNET_TOKENS: TokenInfo[] = [
   { symbol: 'SUI', name: 'Sui', type: SUI_COIN_TYPE, decimals: 9, icon: '💧' },
   { symbol: 'USDC', name: 'USD Coin', type: USDC_COIN_TYPE, decimals: 6, icon: '💵' },
   { symbol: 'CETUS', name: 'Cetus Token', type: CETUS_COIN_TYPE, decimals: 9, icon: '🌊' },
   { symbol: 'wUSDC', name: 'Wormhole USDC', type: WUSDC_COIN_TYPE, decimals: 6, icon: '🌉' },
 ];
 
-const TESTNET_TOKENS = [
+const TESTNET_TOKENS: TokenInfo[] = [
   { symbol: 'SUI', name: 'Sui', type: '0x2::sui::SUI', decimals: 9, icon: '💧' },
   { symbol: 'MEME', name: 'Meme Token', type: '0x5bab1e6852a537a8b07edd10ed9bc2e41d9c75b2ada472bc9bd6bed14000563b::meme_token::MEME_TOKEN', decimals: 9, icon: '🎭' },
   { symbol: 'IDOL_APPLE', name: 'Idol Apple', type: '0xb8adb26867c2dfecdbd7c309754b1e6cc15a0bbe767d28fc28bece56ad991d4c::idol_apple_1767616383788::IDOL_APPLE_1767616383788', decimals: 9, icon: '🍎' },
   { symbol: 'IDOL_DGRAN', name: 'Idol Dgran', type: '0xbe4c4cc55d3aaa1a9c01f17b88199b06b96c032fc698184ea71235260f1d6d4c::idol_dgran_1767614261042::IDOL_DGRAN_1767614261042', decimals: 9, icon: '🎪' },
 ];
-
-const TOKENS_LIST = SUI_NETWORK === 'testnet' ? TESTNET_TOKENS : MAINNET_TOKENS;
 
 import { secureStorage } from '@/utils/storage';
 
@@ -68,10 +67,17 @@ const parseAmount = (amount: string, decimals: number): bigint => {
   return BigInt(integer + paddedFraction);
 };
 
+const pickDifferentToken = (tokens: TokenInfo[], avoidType: string) =>
+  tokens.find((t) => t.type !== avoidType) || null;
+
 export default function SwapPage() {
   const account = useCurrentAccount();
   const suiClient = useSuiClient();
   const { mutateAsync: signAndExecuteTransaction } = useSignAndExecuteTransaction();
+  const defaultTokens = SUI_NETWORK === 'testnet' ? TESTNET_TOKENS : MAINNET_TOKENS;
+  const [availableTokens, setAvailableTokens] = useState<TokenInfo[]>(defaultTokens);
+  const [tokenListLoading, setTokenListLoading] = useState(false);
+  const [tokenListError, setTokenListError] = useState('');
 
   // zkLogin State
   const [zkLoginAddress, setZkLoginAddress] = useState<string | null>(null);
@@ -101,6 +107,52 @@ export default function SwapPage() {
     setTradeStats(getDerivedStats());
   }, []);
 
+  // Load dynamic token list from chain
+  useEffect(() => {
+    const loadTokens = async () => {
+      setTokenListLoading(true);
+      setTokenListError('');
+      try {
+        const dynamicTokens = await getDynamicTokenList();
+        if (dynamicTokens.length < 2) {
+          // Avoid invalid swap pairs (fromToken === toToken) when the dynamic list is incomplete.
+          setTokenListError(
+            dynamicTokens.length === 0
+              ? 'Failed to load token list from chain. Using defaults.'
+              : 'Only one token returned from chain. Using defaults.'
+          );
+          return;
+        }
+
+        if (dynamicTokens.length > 0) {
+          setAvailableTokens(dynamicTokens);
+
+          // Update tokens using functional updates to avoid dependency issues
+          setFromToken(prev => dynamicTokens.find(t => t.type === prev.type) || dynamicTokens[0]);
+
+          setToToken(prev => {
+            const preserved = dynamicTokens.find(t => t.type === prev.type);
+            if (preserved) {
+              // Check if preserved token is different from any token in the list
+              // Since we can't access the updated fromToken here, we do a best-effort check
+              return preserved;
+            }
+            // Fallback: pick second token or first if only one exists
+            return dynamicTokens[1] || dynamicTokens[0];
+          });
+        }
+      } catch (error) {
+        console.warn('Failed to load dynamic token list, using defaults:', error);
+        setTokenListError('Failed to load token list from chain. Using defaults.');
+      }
+      finally {
+        setTokenListLoading(false);
+      }
+    };
+
+    loadTokens();
+  }, []);
+
   const handleGoogleLogin = () => {
     suiClient.getLatestSuiSystemState().then(state => {
         const epoch = Number(state.epoch);
@@ -128,8 +180,8 @@ export default function SwapPage() {
   const [memo, setMemo] = useState('');
   const [gasEstimate, setGasEstimate] = useState<string>('---');
 
-  const [fromToken, setFromToken] = useState(TOKENS_LIST[0]); // Default SUI
-  const [toToken, setToToken] = useState(TOKENS_LIST[1]);   // Default USDC
+  const [fromToken, setFromToken] = useState(defaultTokens[0]); // Default SUI
+  const [toToken, setToToken] = useState(defaultTokens[1] || defaultTokens[0]);   // Default USDC
   const [amountIn, setAmountIn] = useState('');
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [quote, setQuote] = useState<any>(null);
@@ -158,6 +210,15 @@ export default function SwapPage() {
   // 🛡️ Review Modal State
   const [showReviewModal, setShowReviewModal] = useState(false);
   const [pendingAction, setPendingAction] = useState<'swap' | 'transfer' | null>(null);
+
+  // Keep swap mode valid: swapping the same token doesn't make sense and breaks some quote paths.
+  useEffect(() => {
+    if (mode !== 'swap') return;
+    if (availableTokens.length < 2) return;
+    if (fromToken.type !== toToken.type) return;
+    const nextTo = pickDifferentToken(availableTokens, fromToken.type);
+    if (nextTo) setToToken(nextTo);
+  }, [mode, availableTokens, fromToken.type, toToken.type]);
 
   // 💰 Fetch Balance
   const { data: balanceData, refetch: refetchBalance } = useSuiClientQuery(
@@ -870,9 +931,9 @@ export default function SwapPage() {
   // Generate popular pairs based on selected fromToken
   const getPopularPairs = () => {
     const pairs: Array<{ from: string; to: string }> = [];
-    const availableTokens = TOKENS_LIST.filter(t => t.symbol !== fromToken.symbol);
+    const filteredTokens = availableTokens.filter(t => t.symbol !== fromToken.symbol);
 
-    availableTokens.forEach(token => {
+    filteredTokens.forEach(token => {
       // 🛡️ Filter pairs based on available pools
       // On Testnet, mostly SUI pairs exist. 
       // Mainnet has more pairs (SUI-USDC, SUI-CETUS, USDC-CETUS).
@@ -1062,8 +1123,25 @@ export default function SwapPage() {
         {/* Swap Card */}
         <div className="p-6 space-y-6">
 
+          {(tokenListLoading || tokenListError) && (
+            <div
+              className={`rounded-lg border px-3 py-2 text-xs ${
+                tokenListError ? 'border-amber-300 bg-amber-50 text-amber-800' : 'border-blue-200 bg-blue-50 text-blue-700'
+              }`}
+            >
+              {tokenListError || 'Loading tokens from chain...'}
+            </div>
+          )}
+
+          {/* Dynamic Token Warning */}
+          {availableTokens.length > 4 && (
+            <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+              ⚠️ <strong>Note:</strong> Some token pairs may not have available trading pools. If you see &ldquo;No available route&rdquo; errors, try selecting common pairs like SUI→USDC, SUI→CETUS, or USDC→CETUS.
+            </div>
+          )}
+
           {/* Quick Pair Selector */}
-          {currentAddress && (
+          {currentAddress && mode === 'swap' && (
             <div className="bg-gradient-to-r from-blue-50 to-indigo-50 p-3 rounded-lg border border-blue-200">
               <div className="text-xs font-semibold text-gray-600 mb-2">Popular Pairs with {fromToken.symbol}:</div>
               <div className="flex flex-wrap gap-2">
@@ -1071,8 +1149,12 @@ export default function SwapPage() {
                   <button
                     key={`${pair.from}-${pair.to}`}
                     onClick={() => {
-                      setFromToken(TOKENS_LIST.find(t => t.symbol === pair.from) || TOKENS_LIST[0]);
-                      setToToken(TOKENS_LIST.find(t => t.symbol === pair.to) || TOKENS_LIST[1]);
+                      const nextFrom = availableTokens.find(t => t.symbol === pair.from) || availableTokens[0];
+                      const desiredTo = availableTokens.find(t => t.symbol === pair.to);
+                      const fallbackTo = pickDifferentToken(availableTokens, nextFrom.type) || desiredTo || availableTokens[1] || availableTokens[0];
+                      const nextTo = desiredTo && desiredTo.type !== nextFrom.type ? desiredTo : fallbackTo;
+                      setFromToken(nextFrom);
+                      setToToken(nextTo);
                     }}
                     className="px-3 py-1 bg-white border border-blue-300 rounded-lg text-xs font-medium text-blue-700 hover:bg-blue-50 transition-colors"
                   >
@@ -1109,12 +1191,24 @@ export default function SwapPage() {
                 className="bg-transparent text-3xl font-bold text-gray-800 w-full outline-none placeholder-gray-300"
               />
               <div className="relative">
-                <select 
+                <select
                   value={fromToken.symbol}
-                  onChange={(e) => setFromToken(TOKENS_LIST.find(t => t.symbol === e.target.value) || TOKENS_LIST[0])}
+                  onChange={(e) => {
+                    const nextFrom = availableTokens.find(t => t.symbol === e.target.value) || availableTokens[0];
+                    setFromToken(nextFrom);
+                    if (mode === 'swap' && nextFrom.type === toToken.type) {
+                      const nextTo = pickDifferentToken(availableTokens, nextFrom.type);
+                      if (nextTo) setToToken(nextTo);
+                    }
+                  }}
                   className="appearance-none bg-white pl-3 pr-8 py-2 rounded-xl font-bold shadow-sm border border-gray-200 cursor-pointer hover:border-blue-300 transition-colors focus:outline-none focus:border-blue-500"
                 >
-                  {TOKENS_LIST.map(t => <option key={t.symbol} value={t.symbol}>{t.icon} {t.symbol}</option>)}
+                  {(mode === 'swap' && availableTokens.length > 1
+                    ? availableTokens.filter(t => t.type !== toToken.type)
+                    : availableTokens
+                  ).map(t => (
+                    <option key={t.symbol} value={t.symbol}>{t.icon} {t.symbol}</option>
+                  ))}
                 </select>
                 <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2 text-gray-500">
                   <svg className="fill-current h-4 w-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path d="M9.293 12.95l.707.707L15.657 8l-1.414-1.414L10 10.828 5.757 6.586 4.343 8z"/></svg>
@@ -1128,6 +1222,7 @@ export default function SwapPage() {
              <button 
                className="bg-white p-2 rounded-full shadow-lg border border-gray-100 cursor-pointer hover:bg-gray-50 hover:scale-110 transition-transform duration-200 group"
                onClick={() => {
+                 if (availableTokens.length < 2) return;
                  const temp = fromToken;
                  setFromToken(toToken);
                  setToToken(temp);
@@ -1149,12 +1244,22 @@ export default function SwapPage() {
                   {loading ? 'Searching...' : outputAmount}
                 </div>
                 <div className="relative">
-                  <select 
+                  <select
                     value={toToken.symbol}
-                    onChange={(e) => setToToken(TOKENS_LIST.find(t => t.symbol === e.target.value) || TOKENS_LIST[1])}
+                    onChange={(e) => {
+                      const chosen = availableTokens.find(t => t.symbol === e.target.value);
+                      const fallback = pickDifferentToken(availableTokens, fromToken.type) || availableTokens[1] || availableTokens[0];
+                      const nextTo = chosen && chosen.type !== fromToken.type ? chosen : fallback;
+                      setToToken(nextTo);
+                    }}
                     className="appearance-none bg-white pl-3 pr-8 py-2 rounded-xl font-bold shadow-sm border border-gray-200 cursor-pointer hover:border-blue-300 transition-colors focus:outline-none focus:border-blue-500"
                   >
-                    {TOKENS_LIST.map(t => <option key={t.symbol} value={t.symbol}>{t.icon} {t.symbol}</option>)}
+                    {(availableTokens.length > 1
+                      ? availableTokens.filter(t => t.type !== fromToken.type)
+                      : availableTokens
+                    ).map(t => (
+                      <option key={t.symbol} value={t.symbol}>{t.icon} {t.symbol}</option>
+                    ))}
                   </select>
                   <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2 text-gray-500">
                     <svg className="fill-current h-4 w-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path d="M9.293 12.95l.707.707L15.657 8l-1.414-1.414L10 10.828 5.757 6.586 4.343 8z"/></svg>
@@ -1201,14 +1306,14 @@ export default function SwapPage() {
                    )}
                    
                    <div className="relative">
-                    <select 
+                    <select
                       value={toToken.symbol}
-                      onChange={(e) => setToToken(TOKENS_LIST.find(t => t.symbol === e.target.value) || TOKENS_LIST[1])}
+                      onChange={(e) => setToToken(availableTokens.find(t => t.symbol === e.target.value) || availableTokens[1] || availableTokens[0])}
                       className={`appearance-none bg-white pl-3 pr-8 py-2 rounded-xl font-bold shadow-sm border cursor-pointer transition-colors focus:outline-none focus:border-blue-500 ${
                         fromToken.symbol !== toToken.symbol ? 'border-purple-300 text-purple-700' : 'border-gray-200'
                       }`}
                     >
-                      {TOKENS_LIST.map(t => <option key={t.symbol} value={t.symbol}>{t.icon} {t.symbol}</option>)}
+                      {availableTokens.map(t => <option key={t.symbol} value={t.symbol}>{t.icon} {t.symbol}</option>)}
                     </select>
                     <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-2 text-gray-500">
                       <svg className="fill-current h-4 w-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path d="M9.293 12.95l.707.707L15.657 8l-1.414-1.414L10 10.828 5.757 6.586 4.343 8z"/></svg>

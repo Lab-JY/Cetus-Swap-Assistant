@@ -12,14 +12,24 @@ export const CETUS_PARTNER_ID = (process.env.NEXT_PUBLIC_CETUS_PARTNER_ID || '')
 export const ENABLE_RECEIPTS = process.env.NEXT_PUBLIC_ENABLE_RECEIPTS === 'true';
 
 // 💰 Token Configuration
-const MAINNET_TOKENS = {
+export type TokenConfig = {
+    SUI: string;
+    USDC: string;
+    CETUS: string;
+    wUSDC: string;
+    MEME?: string;
+    IDOL_APPLE?: string;
+    IDOL_DGRAN?: string;
+};
+
+const MAINNET_TOKENS: TokenConfig = {
     SUI: '0x2::sui::SUI',
     USDC: '0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC', // Native USDC
     CETUS: '0x06864a6f921804860930db6ddbe2e16acdf8504495ea7481637a1c8b9a8fe54b::cetus::CETUS',
     wUSDC: '0x5d4b302506645c37ff133b98c4b50a5ae14841659738d6d733d59d0d217a93bf::coin::COIN' // Wormhole USDC
 };
 
-const TESTNET_TOKENS = {
+const TESTNET_TOKENS: TokenConfig = {
     SUI: '0x2::sui::SUI',
     USDC: '0xa1ec7fc00a6f40db9693ad1415d0c193ad3906494428cf252621037bd7117e29::usdc::USDC',
     CETUS: '0x06864a6f921804860930db6ddbe2e16acdf8504495ea7481637a1c8b9a8fe54b::cetus::CETUS',
@@ -29,7 +39,7 @@ const TESTNET_TOKENS = {
     IDOL_DGRAN: '0xbe4c4cc55d3aaa1a9c01f17b88199b06b96c032fc698184ea71235260f1d6d4c::idol_dgran_1767614261042::IDOL_DGRAN_1767614261042'
 };
 
-export const TOKENS = SUI_NETWORK === 'mainnet' ? MAINNET_TOKENS : TESTNET_TOKENS;
+export const TOKENS: TokenConfig = SUI_NETWORK === 'mainnet' ? MAINNET_TOKENS : TESTNET_TOKENS;
 
 // 🏊 Pool Configuration
 export const POOL_IDS = {

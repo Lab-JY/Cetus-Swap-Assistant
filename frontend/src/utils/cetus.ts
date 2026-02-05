@@ -11,7 +11,7 @@ export { SUI_NETWORK, CETUS_PARTNER_ID, ENABLE_RECEIPTS }; // Re-export for fron
 
 // 🌟 Initialize Cetus Aggregator SDK
 const aggregator = new AggregatorClient({
-    endpoint: SUI_NETWORK === 'mainnet' ? 'https://api-sui.cetus.zone/router_v3/find_routes' : undefined,
+    endpoint: SUI_NETWORK === 'mainnet' ? 'https://api-sui.cetus.zone/router_v3' : undefined,
     env: SUI_NETWORK === 'mainnet' ? Env.Mainnet : Env.Testnet,
     pythUrls: [
         'https://hermes.pyth.network',
@@ -34,13 +34,16 @@ const COIN_DECIMALS: Record<string, number> = {
     [TOKENS.USDC]: 6,
     [TOKENS.CETUS]: 9,
     [TOKENS.wUSDC]: 6,
-    ...(TOKENS as any).MEME ? { [(TOKENS as any).MEME]: 9 } : {},
-    ...(TOKENS as any).IDOL_APPLE ? { [(TOKENS as any).IDOL_APPLE]: 9 } : {},
-    ...(TOKENS as any).IDOL_DGRAN ? { [(TOKENS as any).IDOL_DGRAN]: 9 } : {},
+    ...(TOKENS.MEME ? { [TOKENS.MEME]: 9 } : {}),
+    ...(TOKENS.IDOL_APPLE ? { [TOKENS.IDOL_APPLE]: 9 } : {}),
+    ...(TOKENS.IDOL_DGRAN ? { [TOKENS.IDOL_DGRAN]: 9 } : {}),
 };
 
 export const getCoinDecimals = (coinType: string) => {
     if (COIN_DECIMALS[coinType]) return COIN_DECIMALS[coinType];
+    const normalized = normalizeType(coinType);
+    const dynamic = poolsCache?.coinDecimals.get(normalized);
+    if (typeof dynamic === 'number') return dynamic;
     if (coinType.includes('::usdc::USDC') || coinType.includes('::coin::COIN')) return 6;
     return 9;
 };
@@ -78,6 +81,14 @@ type QuoteComparison = {
     savingsAbs: string;
     savingsPct: number;
     better: 'aggregator' | 'clmm' | 'equal';
+};
+
+export type TokenInfo = {
+    symbol: string;
+    name: string;
+    type: string;
+    decimals: number;
+    icon?: string;
 };
 
 type QuoteMeta = {
@@ -165,6 +176,247 @@ const getPathEndpoints = (path: any) => {
     };
 };
 
+const getHopEndpoints = (hop: any) => {
+    if (!hop) return { from: '', to: '' };
+    const from = hop.from || hop.coinIn || hop.fromCoinType || hop.inputCoinType || '';
+    const to = hop.to || hop.target || hop.coinOut || hop.toCoinType || hop.outputCoinType || '';
+    return { from, to };
+};
+
+const extractRouteSteps = (path: any): RouteStep[] => {
+    if (!path) return [];
+    const rawHops = Array.isArray(path.path)
+        ? path.path
+        : Array.isArray(path.steps)
+            ? path.steps
+            : [path];
+
+    const steps: RouteStep[] = [];
+    for (const hop of rawHops) {
+        const { from, to } = getHopEndpoints(hop);
+        if (!from || !to) continue;
+        steps.push({
+            from,
+            to,
+            fromSymbol: getTokenSymbol(from),
+            toSymbol: getTokenSymbol(to),
+            provider: String(hop.provider || path.provider || 'Cetus'),
+            feeRate: hop.feeRate ?? path.feeRate,
+        });
+    }
+
+    if (steps.length === 0) {
+        const endpoints = getPathEndpoints(path);
+        if (endpoints.from && endpoints.to) {
+            steps.push({
+                from: endpoints.from,
+                to: endpoints.to,
+                fromSymbol: getTokenSymbol(endpoints.from),
+                toSymbol: getTokenSymbol(endpoints.to),
+                provider: String(path.provider || 'Cetus'),
+                feeRate: path.feeRate,
+            });
+        }
+    }
+
+    return steps;
+};
+
+const buildPathLabel = (steps: RouteStep[], fallbackPath: { from?: string; to?: string }, fallbackProvider?: string) => {
+    const tokenPath = steps.length > 0
+        ? [steps[0].fromSymbol, ...steps.map((s) => s.toSymbol)].join('→')
+        : fallbackPath.from && fallbackPath.to
+            ? `${getTokenSymbol(fallbackPath.from)}→${getTokenSymbol(fallbackPath.to)}`
+            : 'Route';
+    const providers = Array.from(new Set(steps.map((s) => s.provider).filter(Boolean)));
+    const providerLabel = providers.length > 0
+        ? ` (${providers.join(' + ')})`
+        : fallbackProvider
+            ? ` (${fallbackProvider})`
+            : '';
+    return `${tokenPath}${providerLabel}`;
+};
+
+const POOLS_CACHE_TTL_MS = 5 * 60 * 1000;
+const POOLS_CACHE_ERROR_TTL_MS = 30 * 1000;
+let poolsCache: {
+    expiresAt: number;
+    poolByPair: Map<string, string>;
+    coinDecimals: Map<string, number>;
+    coinTypes: Map<string, string>;
+    tokenInfoByType: Map<string, { symbol?: string; name?: string; decimals?: number; address?: string }>;
+} | null = null;
+let poolsInFlight: Promise<void> | null = null;
+
+const buildPairKey = (a: string, b: string) => `${normalizeType(a)}-${normalizeType(b)}`;
+
+const loadCetusPools = async () => {
+    const now = Date.now();
+    if (poolsCache && poolsCache.expiresAt > now) return;
+    if (poolsInFlight) return poolsInFlight;
+
+    poolsInFlight = (async () => {
+        const previousCache = poolsCache;
+        const poolByPair = new Map<string, string>();
+        const coinDecimals = new Map<string, number>();
+        const coinTypes = new Map<string, string>();
+        const tokenInfoByType = new Map<string, { symbol?: string; name?: string; decimals?: number; address?: string }>();
+
+        try {
+            const [poolList, tokenList] = await Promise.all([
+                cetusClmm.Token.getAllRegisteredPoolList(),
+                cetusClmm.Token.getAllRegisteredTokenList(),
+            ]);
+
+            if (Array.isArray(tokenList)) {
+                for (const token of tokenList) {
+                    if (!token?.address) continue;
+                    const normalized = normalizeType(token.address);
+                    tokenInfoByType.set(normalized, {
+                        symbol: token.symbol,
+                        name: token.name,
+                        decimals: token.decimals,
+                        address: token.address,
+                    });
+                    if (typeof token.decimals === 'number') {
+                        coinDecimals.set(normalized, token.decimals);
+                    }
+                    if (!coinTypes.has(normalized)) coinTypes.set(normalized, token.address);
+                }
+            }
+
+            if (Array.isArray(poolList)) {
+                for (const pool of poolList) {
+                    const coinA = pool?.coin_a_address;
+                    const coinB = pool?.coin_b_address;
+                    const poolAddress = pool?.address;
+                    if (!coinA || !coinB || !poolAddress) continue;
+
+                    const normalizedA = normalizeType(coinA);
+                    const normalizedB = normalizeType(coinB);
+                    if (!coinTypes.has(normalizedA)) coinTypes.set(normalizedA, coinA);
+                    if (!coinTypes.has(normalizedB)) coinTypes.set(normalizedB, coinB);
+
+                    const keyAB = buildPairKey(coinA, coinB);
+                    const keyBA = buildPairKey(coinB, coinA);
+                    if (!poolByPair.has(keyAB)) poolByPair.set(keyAB, poolAddress);
+                    if (!poolByPair.has(keyBA)) poolByPair.set(keyBA, poolAddress);
+                }
+            }
+
+            poolsCache = {
+                expiresAt: Date.now() + POOLS_CACHE_TTL_MS,
+                poolByPair,
+                coinDecimals,
+                coinTypes,
+                tokenInfoByType,
+            };
+        } catch (error) {
+            console.warn('Failed to load Cetus pools info from chain', error);
+            const now = Date.now();
+            const hasPartialData = poolByPair.size > 0 || coinDecimals.size > 0 || coinTypes.size > 0 || tokenInfoByType.size > 0;
+            if (hasPartialData) {
+                poolsCache = {
+                    expiresAt: now + POOLS_CACHE_ERROR_TTL_MS,
+                    poolByPair,
+                    coinDecimals,
+                    coinTypes,
+                    tokenInfoByType,
+                };
+            } else if (previousCache) {
+                poolsCache = { ...previousCache, expiresAt: now + POOLS_CACHE_ERROR_TTL_MS };
+            } else {
+                poolsCache = {
+                    expiresAt: now + POOLS_CACHE_ERROR_TTL_MS,
+                    poolByPair,
+                    coinDecimals,
+                    coinTypes,
+                    tokenInfoByType,
+                };
+            }
+        } finally {
+            poolsInFlight = null;
+        }
+    })();
+
+    return poolsInFlight;
+};
+
+const getPoolAddressForPairDynamic = async (fromCoinType: string, toCoinType: string) => {
+    await loadCetusPools();
+    const key = buildPairKey(fromCoinType, toCoinType);
+    return poolsCache?.poolByPair.get(key) || '';
+};
+
+const TOKEN_ICON_MAP: Record<string, string> = {
+    SUI: '💧',
+    USDC: '💵',
+    CETUS: '🌊',
+    wUSDC: '🌉',
+    MEME: '🎭',
+};
+
+const TOKEN_NAME_MAP: Record<string, string> = {
+    SUI: 'Sui',
+    USDC: 'USD Coin',
+    CETUS: 'Cetus Token',
+    wUSDC: 'Wormhole USDC',
+    MEME: 'Meme Token',
+};
+
+const deriveSymbolFromType = (coinType: string) => {
+    const normalized = normalizeType(coinType);
+    if (normalizeType(TOKENS.wUSDC) === normalized) return 'wUSDC';
+    const parts = coinType.split('::');
+    return parts[parts.length - 1] || 'UNKNOWN';
+};
+
+const buildTokenInfo = (coinType: string): TokenInfo => {
+    const symbol = deriveSymbolFromType(coinType);
+    const normalized = normalizeType(coinType);
+    const tokenInfo = poolsCache?.tokenInfoByType.get(normalized);
+    return {
+        symbol: tokenInfo?.symbol || symbol,
+        name: tokenInfo?.name || TOKEN_NAME_MAP[symbol] || symbol,
+        type: coinType,
+        decimals: typeof tokenInfo?.decimals === 'number' ? tokenInfo.decimals : getCoinDecimals(coinType),
+        icon: TOKEN_ICON_MAP[tokenInfo?.symbol || symbol] || '🪙',
+    };
+};
+
+export const getDynamicTokenList = async (): Promise<TokenInfo[]> => {
+    await loadCetusPools();
+    const tokens: TokenInfo[] = [];
+    const seen = new Set<string>();
+
+    const addToken = (coinType?: string) => {
+        if (!coinType) return;
+        const normalized = normalizeType(coinType);
+        if (seen.has(normalized)) return;
+        seen.add(normalized);
+        tokens.push(buildTokenInfo(coinType));
+    };
+
+    // Seed with known tokens for stable UX
+    addToken(TOKENS.SUI);
+    addToken(TOKENS.USDC);
+    addToken(TOKENS.CETUS);
+    addToken(TOKENS.wUSDC);
+    if (TOKENS.MEME) addToken(TOKENS.MEME);
+    if (TOKENS.IDOL_APPLE) addToken(TOKENS.IDOL_APPLE);
+    if (TOKENS.IDOL_DGRAN) addToken(TOKENS.IDOL_DGRAN);
+
+    // Add tokens discovered from pools
+    if (poolsCache?.coinTypes) {
+        for (const coinType of poolsCache.coinTypes.values()) {
+            addToken(coinType);
+        }
+    }
+
+    tokens.sort((a, b) => a.symbol.localeCompare(b.symbol));
+    return tokens;
+};
+
 const buildRouteDetails = (source: 'aggregator' | 'clmm', steps: RouteStep[]): RouteDetails => {
     const providers = Array.from(new Set(steps.map((s) => s.provider)));
     const pathText = steps.map((s) => `${s.fromSymbol}→${s.toSymbol}`).join(' | ');
@@ -201,30 +453,29 @@ const toAsciiLabel = (value: string) => {
     return replaced.replace(/[^\x20-\x7E]/g, '');
 };
 
-const getPoolAddressForPair = (fromCoinType: string, toCoinType: string): string => {
+const getPoolAddressForPair = async (fromCoinType: string, toCoinType: string): Promise<string> => {
     const network = SUI_NETWORK === 'mainnet' ? 'mainnet' : 'testnet';
-    const pools = POOL_IDS[network] as any;
-
     const pairKey = `${fromCoinType}-${toCoinType}`;
     const reversePairKey = `${toCoinType}-${fromCoinType}`;
 
-    let POOL_MAP: Record<string, string> = {};
-
-    if (network === 'mainnet') {
-        POOL_MAP = {
-            [`${TOKENS.SUI}-${TOKENS.USDC}`]: pools.SUI_USDC,
-            [`${TOKENS.SUI}-${TOKENS.CETUS}`]: pools.SUI_CETUS,
-            [`${TOKENS.USDC}-${TOKENS.CETUS}`]: pools.USDC_CETUS,
+    // Fast path: known pools from static config (avoid async dynamic lookup)
+    const POOL_MAP: Record<string, string> = network === 'mainnet'
+        ? {
+            [`${TOKENS.SUI}-${TOKENS.USDC}`]: POOL_IDS.mainnet.SUI_USDC,
+            [`${TOKENS.SUI}-${TOKENS.CETUS}`]: POOL_IDS.mainnet.SUI_CETUS,
+            [`${TOKENS.USDC}-${TOKENS.CETUS}`]: POOL_IDS.mainnet.USDC_CETUS,
+        }
+        : {
+            ...(TOKENS.MEME ? { [`${TOKENS.SUI}-${TOKENS.MEME}`]: POOL_IDS.testnet.SUI_MEME } : {}),
+            ...(TOKENS.IDOL_APPLE ? { [`${TOKENS.SUI}-${TOKENS.IDOL_APPLE}`]: POOL_IDS.testnet.SUI_IDOL_APPLE } : {}),
+            ...(TOKENS.IDOL_DGRAN ? { [`${TOKENS.SUI}-${TOKENS.IDOL_DGRAN}`]: POOL_IDS.testnet.SUI_IDOL_DGRAN } : {}),
         };
-    } else {
-        POOL_MAP = {
-            [`${TOKENS.SUI}-${(TOKENS as any).MEME}`]: pools.SUI_MEME,
-            [`${TOKENS.SUI}-${(TOKENS as any).IDOL_APPLE}`]: pools.SUI_IDOL_APPLE,
-            [`${TOKENS.SUI}-${(TOKENS as any).IDOL_DGRAN}`]: pools.SUI_IDOL_DGRAN,
-        };
-    }
 
-    return POOL_MAP[pairKey] || POOL_MAP[reversePairKey] || '';
+    const staticPool = POOL_MAP[pairKey] || POOL_MAP[reversePairKey];
+    if (staticPool) return staticPool;
+
+    const dynamicPool = await getPoolAddressForPairDynamic(fromCoinType, toCoinType);
+    return dynamicPool || '';
 };
 
 const getDirectPoolQuote = async (
@@ -240,7 +491,7 @@ const getDirectPoolQuote = async (
     rawSwapResult: any;
     routeDetails: RouteDetails;
 } | null> => {
-    const poolAddress = getPoolAddressForPair(fromCoinType, toCoinType);
+    const poolAddress = await getPoolAddressForPair(fromCoinType, toCoinType);
     if (!poolAddress) return null;
 
     const pool = await cetusClmm.Pool.getPool(poolAddress);
@@ -321,14 +572,16 @@ export async function getSwapQuote(
                 const endpoints = getPathEndpoints(path);
                 const pathFrom = endpoints.from || path.from;
                 const pathTo = endpoints.to || path.target || path.to;
-                const pathSteps = [{
+                const extractedSteps = extractRouteSteps(path);
+                const fallbackSteps: RouteStep[] = pathFrom && pathTo ? [{
                     from: pathFrom,
                     to: pathTo,
-                    provider: path.provider,
+                    fromSymbol: getTokenSymbol(pathFrom),
+                    toSymbol: getTokenSymbol(pathTo),
+                    provider: String(path.provider || 'Cetus Aggregator'),
                     feeRate: path.feeRate,
-                    amountIn: path.amountIn,
-                    amountOut: path.amountOut
-                }];
+                }] : [];
+                const pathSteps = extractedSteps.length > 0 ? extractedSteps : fallbackSteps;
 
                 return {
                     id: idx,
@@ -346,12 +599,13 @@ export async function getSwapQuote(
             const bestEndpoints = getPathEndpoints(bestPath);
             const bestFrom = bestEndpoints.from || bestPath.from;
             const bestTo = bestEndpoints.to || bestPath.target || bestPath.to;
-            const routeSteps: RouteStep[] = [{
+            const bestSteps = extractRouteSteps(bestPath);
+            const routeSteps: RouteStep[] = bestSteps.length > 0 ? bestSteps : [{
                 from: bestFrom,
                 to: bestTo,
                 fromSymbol: getTokenSymbol(bestFrom),
                 toSymbol: getTokenSymbol(bestTo),
-                provider: bestPath.provider || 'Cetus Aggregator',
+                provider: String(bestPath.provider || 'Cetus Aggregator'),
                 feeRate: bestPath.feeRate,
             }];
 
@@ -359,9 +613,10 @@ export async function getSwapQuote(
                 const endpoints = getPathEndpoints(path);
                 const pathFrom = endpoints.from || path.from;
                 const pathTo = endpoints.to || path.target || path.to;
+                const pathSteps = extractRouteSteps(path);
                 return {
-                    label: `${getTokenSymbol(pathFrom)}→${getTokenSymbol(pathTo)} (${path.provider || 'Cetus'})`,
-                    steps: [path],
+                    label: buildPathLabel(pathSteps, { from: pathFrom, to: pathTo }, path.provider || 'Cetus'),
+                    steps: Array.isArray(path.path) ? path.path : (Array.isArray(path.steps) ? path.steps : [path]),
                     id: idx,
                 };
             });
@@ -370,6 +625,7 @@ export async function getSwapQuote(
                 ? bestPath.amountOut.toString()
                 : bestPath.amountOut;
 
+            const defaultRoute = routes[0];
             aggregatorQuote = {
                 amountOut: normalizedAmountOut,
                 estimatedFee: 0,
@@ -377,13 +633,14 @@ export async function getSwapQuote(
                 source: 'aggregator',
                 routes: routes,
                 paths,
-                selectedRouteId: 0, // Best route is first after sorting
+                selectedRouteId: defaultRoute?.id ?? 0, // Best route is first after sorting
+                selectedRoute: defaultRoute,
                 rawSwapResult: { ...routerData, paths: sortedPaths },
                 fullRouterData: routerData,
                 routeDetails: buildRouteDetails('aggregator', routeSteps),
             };
         } else {
-            aggregatorError = 'No valid routes for requested target';
+            aggregatorError = 'No trading route found for this token pair';
         }
     } catch (error) {
         meta.aggregatorLatencyMs = Date.now() - aggStart;
@@ -427,9 +684,9 @@ export async function getSwapQuote(
         };
     }
 
-    const aggregatorReason = aggregatorError || 'Unavailable';
-    const errorMsg = `No available route (Aggregator: ${aggregatorReason}; Direct pool: not configured).`;
-    console.error("❌ Error finding quote:", errorMsg);
+    const aggregatorReason = aggregatorError || 'Service unavailable';
+    const errorMsg = `This token pair cannot be traded yet. There may not be enough liquidity or the trading pool doesn't exist. Try a different token pair.`;
+    console.error("❌ Error finding quote:", errorMsg, `(Details: Aggregator: ${aggregatorReason}; Direct pool: not configured)`);
     return {
         error: true,
         errorMessage: errorMsg,
@@ -804,16 +1061,26 @@ export function applySelectedRoute(quote: any, selectedRouteId: number) {
         return quote;
     }
     const selectedRoute = quote.routes.find((route: any) => route.id === selectedRouteId) || quote.routes[0];
+    const selectedSteps = Array.isArray(selectedRoute?.pathSteps) && selectedRoute.pathSteps.length > 0
+        ? selectedRoute.pathSteps
+        : extractRouteSteps(selectedRoute?.router?.path?.[0] || selectedRoute?.rawSwapResult?.path?.[0]);
+    const updatedRouteDetails = selectedSteps.length > 0
+        ? buildRouteDetails('aggregator', selectedSteps)
+        : quote.routeDetails;
     return {
         ...quote,
+        selectedRouteId: selectedRoute?.id ?? selectedRouteId,
         selectedRoute,
         amountOut: selectedRoute.amountOut ? selectedRoute.amountOut.toString() : quote.amountOut,
+        routeDetails: updatedRouteDetails,
     };
 }
 
 // Helper to get token symbol from coin type
 export function getTokenSymbol(coinType: string): string {
     const normalized = normalizeType(coinType);
+    const dynamicSymbol = poolsCache?.tokenInfoByType.get(normalized)?.symbol;
+    if (dynamicSymbol) return dynamicSymbol;
     if (coinType.includes('::sui::SUI')) return 'SUI';
     if (coinType.includes('::usdc::USDC')) return 'USDC';
     if (coinType.includes('::cetus::CETUS')) return 'CETUS';
