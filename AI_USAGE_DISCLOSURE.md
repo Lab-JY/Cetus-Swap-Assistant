@@ -12,7 +12,7 @@ In compliance with the **Sui Vibe Hackathon 2026** rules (Requirement #6), we fu
 | **Claude Code** | Claude Haiku 4.5 | Code generation, debugging, refactoring, problem-solving, and documentation writing |
 | **Google Gemini** | Gemini 3 Pro | Code analysis, architectural design, and complex problem-solving |
 | **GitHub Copilot** | GPT-5.2-Codex | Inline code completion and boilerplate generation |
-| **OpenAI ChatGPT (Codex CLI)** | GPT-5 | Documentation cleanup, AI disclosure consolidation, and hackathon compliance edits |
+| **OpenAI ChatGPT (Codex CLI)** | GPT-5 | Real data integration (Insights), API proxy routes, error handling, UI refinements, and documentation updates |
 
 ---
 

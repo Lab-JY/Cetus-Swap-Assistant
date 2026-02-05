@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { ConnectButton, useCurrentAccount, useSignAndExecuteTransaction, useSuiClient, useSuiClientQuery } from '@mysten/dapp-kit';
 import { Transaction } from '@mysten/sui/transactions';
 import { isValidSuiAddress } from '@mysten/sui/utils';
-import { SUI_COIN_TYPE, USDC_COIN_TYPE, CETUS_COIN_TYPE, WUSDC_COIN_TYPE, buildSimpleSwapTx, SUI_NETWORK, buildTransferTx, selectAndPrepareCoins, applySelectedRoute, ENABLE_RECEIPTS, getCetusPartnerInfo, getPartnerRefFeeAmounts, CETUS_PARTNER_ID, formatCoinAmount, getTokenSymbol, getDynamicTokenList } from '@/utils/cetus';
+import { SUI_COIN_TYPE, USDC_COIN_TYPE, CETUS_COIN_TYPE, WUSDC_COIN_TYPE, buildSimpleSwapTx, SUI_NETWORK, buildTransferTx, selectAndPrepareCoins, applySelectedRoute, ENABLE_RECEIPTS, getCetusPartnerInfo, getPartnerRefFeeAmounts, CETUS_PARTNER_ID, formatCoinAmount, getTokenSymbol, getDynamicTokenList, getCoinDecimals, getRecentSwapEvents, type SwapEventRecord } from '@/utils/cetus';
 import type { TokenInfo } from '@/utils/cetus';
 import { getQuoteWithCache } from '@/utils/quoteService';
 import { preflightTransaction } from '@/utils/preflight';
@@ -13,10 +13,15 @@ import { executeWithRetry } from '@/utils/retry';
 import { getFriendlyErrorMessage } from '@/utils/errors';
 import TransactionStepper from '@/components/TransactionStepper';
 import Image from 'next/image';
-import { RefreshCcw, ArrowDownUp, Wallet, LogOut, Copy, CheckCircle2, XCircle, Settings } from 'lucide-react';
+import { RefreshCcw, ArrowDownUp, Wallet, LogOut, Copy, CheckCircle2, XCircle, Settings, TrendingUp, Users } from 'lucide-react';
 import { getGoogleLoginUrl, clearZkLoginSession, signTransactionWithZkLogin } from '@/utils/zklogin';
 import confetti from 'canvas-confetti';
 import SwapHistory from '@/components/SwapHistory';
+import AIInsightCard from '@/components/AIInsightCard';
+import PriceChart from '@/components/PriceChart';
+import TradingCard, { TradingCardData } from '@/components/TradingCard';
+import TradingLeaderboard, { LeaderboardEntry } from '@/components/TradingLeaderboard';
+import { generateAIInsight, fetchPriceHistory, fetchSpotPrice, type AIInsight, type PriceData } from '@/utils/aiInsights';
 
 const MAINNET_TOKENS: TokenInfo[] = [
   { symbol: 'SUI', name: 'Sui', type: SUI_COIN_TYPE, decimals: 9, icon: '💧' },
@@ -175,7 +180,7 @@ export default function SwapPage() {
     account?.chains && 
     ((SUI_NETWORK === 'mainnet' && !account.chains.includes('sui:mainnet')) ||
      (SUI_NETWORK === 'testnet' && !account.chains.includes('sui:testnet')));
-  const [mode, setMode] = useState<'swap' | 'transfer'>('swap');
+  const [mode, setMode] = useState<'swap' | 'transfer' | 'insights'>('swap');
   const [recipientAddress, setRecipientAddress] = useState('');
   const [memo, setMemo] = useState('');
   const [gasEstimate, setGasEstimate] = useState<string>('---');
@@ -206,6 +211,12 @@ export default function SwapPage() {
   const [partnerRebates, setPartnerRebates] = useState<Array<{ coinAddress: string; balance: bigint }>>([]);
   const [partnerRebateLoading, setPartnerRebateLoading] = useState(false);
   const [partnerRebateError, setPartnerRebateError] = useState('');
+  const [insight, setInsight] = useState<AIInsight | null>(null);
+  const [insightLoading, setInsightLoading] = useState(false);
+  const [insightError, setInsightError] = useState('');
+  const [priceHistory, setPriceHistory] = useState<PriceData[]>([]);
+  const [recentTrade, setRecentTrade] = useState<TradingCardData | null>(null);
+  const [leaderboardEntries, setLeaderboardEntries] = useState<LeaderboardEntry[]>([]);
   
   // 🛡️ Review Modal State
   const [showReviewModal, setShowReviewModal] = useState(false);
@@ -400,6 +411,99 @@ export default function SwapPage() {
     };
   }, [lastTxDigest]);
 
+  useEffect(() => {
+    if (mode !== 'insights') return;
+    let active = true;
+
+    const loadInsights = async () => {
+      setInsightLoading(true);
+      setInsightError('');
+      try {
+        const history = await fetchPriceHistory(fromToken.symbol);
+        if (!active) return;
+        setPriceHistory(history);
+
+        const currentPrice = history.length > 0
+          ? history[history.length - 1].price
+          : await fetchSpotPrice(fromToken.symbol);
+        if (active && history.length === 0 && currentPrice === null) {
+          setInsightError(`暂无 ${fromToken.symbol} 的市场数据`);
+        }
+
+        const hasMarketData = history.length > 0 || currentPrice !== null;
+        if (hasMarketData) {
+          const avgVolume = history.length > 0
+            ? history.reduce((sum, point) => sum + point.volume, 0) / history.length
+            : 0;
+          const liquidityDepth = Math.min(100, Math.max(10, Math.log10(avgVolume + 1) * 10));
+
+          const aiInsight = await generateAIInsight(
+            fromToken.symbol,
+            toToken.symbol,
+            0,
+            history,
+            currentPrice ?? undefined,
+            liquidityDepth,
+            0.005
+          );
+          if (!active) return;
+          setInsight(aiInsight);
+        } else {
+          setInsight(null);
+        }
+
+        const events = await getRecentSwapEvents(suiClient, 50);
+        if (!active) return;
+
+        const symbols = Array.from(new Set(events.flatMap((event) => [
+          getTokenSymbol(event.fromCoin),
+          getTokenSymbol(event.toCoin),
+        ]))).map((s) => s.toUpperCase());
+
+        const priceMap: Record<string, number | null> = { USDC: 1, WUSDC: 1 };
+        await Promise.all(symbols.map(async (symbol) => {
+          if (priceMap[symbol] !== undefined) return;
+          try {
+            const price = await fetchSpotPrice(symbol);
+            priceMap[symbol] = price;
+          } catch {
+            priceMap[symbol] = null;
+          }
+        }));
+
+        const leaderboard = buildLeaderboardEntries(events, priceMap);
+        const topEvent = events[0];
+        const topEntry = leaderboard.find((entry) => entry.trader.address === topEvent?.sender);
+        const topCard = topEvent
+          ? buildTradeCardData(
+              topEvent,
+              priceMap,
+              topEntry?.rank,
+              topEntry?.stats.totalTrades,
+              topEntry?.stats.followers,
+              topEntry?.stats.totalVolume
+            )
+          : null;
+
+        setLeaderboardEntries(leaderboard);
+        setRecentTrade(topCard);
+      } catch (err) {
+        setInsightError(err instanceof Error ? err.message : 'Failed to load insights');
+        setPriceHistory([]);
+        setInsight(null);
+        setRecentTrade(null);
+        setLeaderboardEntries([]);
+      } finally {
+        if (active) setInsightLoading(false);
+      }
+    };
+
+    loadInsights();
+    return () => {
+      active = false;
+    };
+  }, [mode, fromToken.symbol, toToken.symbol, suiClient]);
+
   const effectiveQuote = quote ? applySelectedRoute(quote, selectedRouteId) : quote;
   const receiptNote = ENABLE_RECEIPTS ? ' Receipt object minted.' : '';
   const isZapMode = mode === 'transfer' && fromToken.symbol !== toToken.symbol;
@@ -418,6 +522,115 @@ export default function SwapPage() {
     })
     .map((asset) => `${formatCoinAmount(asset.coinAddress, asset.balance)} ${getTokenSymbol(asset.coinAddress)}`)
     .join(' · ');
+
+  const formatAmountWithSymbol = (coinType: string, amount: string, precision: number = 4) => {
+    return `${formatCoinAmount(coinType, amount, precision)} ${getTokenSymbol(coinType)}`;
+  };
+
+  const estimateUsdValue = (
+    coinType: string,
+    amount: string,
+    priceMap: Record<string, number | null>
+  ) => {
+    const symbol = getTokenSymbol(coinType);
+    const normalizedSymbol = symbol.toUpperCase();
+    const price = normalizedSymbol === 'USDC' || normalizedSymbol === 'WUSDC'
+      ? 1
+      : priceMap[normalizedSymbol] ?? null;
+    if (!price) return null;
+    const decimals = getCoinDecimals(coinType);
+    const numericAmount = Number(amount) / Math.pow(10, decimals);
+    if (!Number.isFinite(numericAmount)) return null;
+    return numericAmount * price;
+  };
+
+  const buildTradeCardData = (
+    event: SwapEventRecord,
+    priceMap: Record<string, number | null>,
+    rank?: number,
+    totalTrades?: number,
+    recentCount?: number,
+    totalVolume?: string
+  ): TradingCardData => {
+    const amountText = formatAmountWithSymbol(event.fromCoin, event.amountIn);
+    const valueUsd = estimateUsdValue(event.toCoin, event.amountOut, priceMap)
+      ?? estimateUsdValue(event.fromCoin, event.amountIn, priceMap);
+    const valueText = valueUsd !== null
+      ? `$${valueUsd.toFixed(2)}`
+      : formatAmountWithSymbol(event.toCoin, event.amountOut);
+
+    return {
+      trader: {
+        address: event.sender,
+        rank,
+        winRate: 100,
+      },
+      trade: {
+        from: getTokenSymbol(event.fromCoin),
+        to: getTokenSymbol(event.toCoin),
+        amount: amountText,
+        value: valueText,
+        valueLabel: valueUsd !== null ? '估算成交额' : '成交量',
+        route: ['Cetus'],
+        timestamp: event.timestamp || Date.now(),
+      },
+      stats: {
+        totalTrades,
+        totalVolume: totalVolume ?? (valueUsd !== null ? `$${valueUsd.toFixed(2)}` : undefined),
+        followers: recentCount,
+      },
+    };
+  };
+
+  const buildLeaderboardEntries = (
+    events: SwapEventRecord[],
+    priceMap: Record<string, number | null>
+  ): LeaderboardEntry[] => {
+    const traderMap = new Map<string, {
+      totalTrades: number;
+      totalVolumeUsd: number;
+      recentCount: number;
+      latestEvent: SwapEventRecord;
+    }>();
+
+    events.forEach((event) => {
+      if (!event.sender) return;
+      const valueUsd = estimateUsdValue(event.toCoin, event.amountOut, priceMap)
+        ?? estimateUsdValue(event.fromCoin, event.amountIn, priceMap)
+        ?? 0;
+      const entry = traderMap.get(event.sender);
+      if (!entry) {
+        traderMap.set(event.sender, {
+          totalTrades: 1,
+          totalVolumeUsd: valueUsd,
+          recentCount: 1,
+          latestEvent: event,
+        });
+      } else {
+        entry.totalTrades += 1;
+        entry.totalVolumeUsd += valueUsd;
+        entry.recentCount += 1;
+        if (event.timestamp > entry.latestEvent.timestamp) {
+          entry.latestEvent = event;
+        }
+      }
+    });
+
+    return Array.from(traderMap.entries())
+      .sort((a, b) => b[1].totalTrades - a[1].totalTrades || b[1].totalVolumeUsd - a[1].totalVolumeUsd)
+      .slice(0, 3)
+      .map(([address, stats], idx) => ({
+        rank: idx + 1,
+        trader: { address },
+        stats: {
+          totalTrades: stats.totalTrades,
+          totalVolume: stats.totalVolumeUsd > 0 ? `$${stats.totalVolumeUsd.toFixed(2)}` : '—',
+          winRate: 100,
+          followers: stats.recentCount,
+        },
+        recentTrade: buildTradeCardData(stats.latestEvent, priceMap).trade,
+      }));
+  };
 
   // 🏗️ Build Swap Transaction Helper
   const buildSwapTransaction = useCallback(async () => {
@@ -1015,14 +1228,22 @@ export default function SwapPage() {
             >
               Transfer
             </button>
+            <button
+              onClick={() => setMode('insights')}
+              className={`flex-1 text-xs font-bold uppercase tracking-wider transition-all duration-200 ${
+                mode === 'insights' ? 'bg-white/20 text-white shadow-inner' : 'text-white/60 hover:bg-white/10 hover:text-white'
+              }`}
+            >
+              Insights
+            </button>
           </div>
 
           <div className="mt-6">
             <div className="flex items-center gap-2">
-              {mode === 'swap' ? <RefreshCcw className="h-6 w-6 animate-spin-slow" /> : <div className="h-6 w-6"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg></div>}
-              <h1 className="text-2xl font-bold">{mode === 'swap' ? 'Cetus RoutePay' : 'Transfer'}</h1>
+              {mode === 'swap' ? <RefreshCcw className="h-6 w-6 animate-spin-slow" /> : mode === 'insights' ? <TrendingUp className="h-6 w-6" /> : <div className="h-6 w-6"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg></div>}
+              <h1 className="text-2xl font-bold">{mode === 'swap' ? 'Cetus RoutePay' : mode === 'insights' ? 'AI Trading Insights' : 'Transfer'}</h1>
             </div>
-            <p className="text-sm opacity-80 mt-1">{mode === 'swap' ? 'Best Price Aggregator' : 'Send tokens with memo'}</p>
+            <p className="text-sm opacity-80 mt-1">{mode === 'swap' ? 'Best Price Aggregator' : mode === 'insights' ? 'AI-Powered Analysis & Social Trading' : 'Send tokens with memo'}</p>
           </div>
           
           {/* Wallet / zkLogin */}
@@ -1143,7 +1364,13 @@ export default function SwapPage() {
           {/* Quick Pair Selector */}
           {currentAddress && mode === 'swap' && (
             <div className="bg-gradient-to-r from-blue-50 to-indigo-50 p-3 rounded-lg border border-blue-200">
-              <div className="text-xs font-semibold text-gray-600 mb-2">Popular Pairs with {fromToken.symbol}:</div>
+              <div className="text-xs font-semibold text-gray-600 mb-2">
+                Popular Pairs with{' '}
+                <span className="inline-block max-w-[120px] align-bottom truncate" title={fromToken.symbol}>
+                  {fromToken.symbol}
+                </span>
+                :
+              </div>
               <div className="flex flex-wrap gap-2">
                 {getPopularPairs().map((pair) => (
                   <button
@@ -1156,7 +1383,8 @@ export default function SwapPage() {
                       setFromToken(nextFrom);
                       setToToken(nextTo);
                     }}
-                    className="px-3 py-1 bg-white border border-blue-300 rounded-lg text-xs font-medium text-blue-700 hover:bg-blue-50 transition-colors"
+                    className="px-3 py-1 bg-white border border-blue-300 rounded-lg text-xs font-medium text-blue-700 hover:bg-blue-50 transition-colors max-w-[160px] truncate"
+                    title={`${pair.from} → ${pair.to}`}
                   >
                     {pair.from} → {pair.to}
                   </button>
@@ -1165,6 +1393,56 @@ export default function SwapPage() {
             </div>
           )}
 
+          {/* Insights Mode Content */}
+          {mode === 'insights' && (
+            <div className="space-y-4">
+              {insightLoading && (
+                <div className="text-sm text-gray-500">正在加载链上与市场数据…</div>
+              )}
+              {!insightLoading && insightError && (
+                <div className="text-sm text-red-500">{insightError}</div>
+              )}
+
+              {/* AI Insight Card */}
+              {insight && (
+                <AIInsightCard
+                  insight={insight}
+                  fromToken={fromToken.symbol}
+                  toToken={toToken.symbol}
+                />
+              )}
+
+              {/* Price Chart */}
+              <PriceChart
+                data={priceHistory}
+                tokenSymbol={fromToken.symbol}
+              />
+
+              {/* Trading Card Example */}
+              {recentTrade ? (
+                <TradingCard
+                  data={recentTrade}
+                  onShare={() => {
+                    console.log('Share trading card');
+                  }}
+                />
+              ) : (
+                <div className="text-sm text-gray-500">暂无链上交易卡片数据</div>
+              )}
+
+              {/* Trading Leaderboard */}
+              <TradingLeaderboard
+                entries={leaderboardEntries}
+                onFollowTrader={(address) => {
+                  console.log('Follow trader:', address);
+                }}
+              />
+            </div>
+          )}
+
+          {/* Swap/Transfer Mode Content */}
+          {(mode === 'swap' || mode === 'transfer') && (
+            <>
           {/* From Token */}
           <div className="bg-gray-50 p-4 rounded-xl border border-gray-100 focus-within:ring-2 focus-within:ring-blue-100 transition-all">
             <div className="flex justify-between mb-2">
@@ -1201,7 +1479,8 @@ export default function SwapPage() {
                       if (nextTo) setToToken(nextTo);
                     }
                   }}
-                  className="appearance-none bg-white pl-3 pr-8 py-2 rounded-xl font-bold shadow-sm border border-gray-200 cursor-pointer hover:border-blue-300 transition-colors focus:outline-none focus:border-blue-500"
+                  className="appearance-none bg-white pl-3 pr-8 py-2 rounded-xl font-bold shadow-sm border border-gray-200 cursor-pointer hover:border-blue-300 transition-colors focus:outline-none focus:border-blue-500 max-w-[160px] truncate"
+                  title={fromToken.symbol}
                 >
                   {(mode === 'swap' && availableTokens.length > 1
                     ? availableTokens.filter(t => t.type !== toToken.type)
@@ -1252,7 +1531,8 @@ export default function SwapPage() {
                       const nextTo = chosen && chosen.type !== fromToken.type ? chosen : fallback;
                       setToToken(nextTo);
                     }}
-                    className="appearance-none bg-white pl-3 pr-8 py-2 rounded-xl font-bold shadow-sm border border-gray-200 cursor-pointer hover:border-blue-300 transition-colors focus:outline-none focus:border-blue-500"
+                    className="appearance-none bg-white pl-3 pr-8 py-2 rounded-xl font-bold shadow-sm border border-gray-200 cursor-pointer hover:border-blue-300 transition-colors focus:outline-none focus:border-blue-500 max-w-[160px] truncate"
+                    title={toToken.symbol}
                   >
                     {(availableTokens.length > 1
                       ? availableTokens.filter(t => t.type !== fromToken.type)
@@ -1311,7 +1591,8 @@ export default function SwapPage() {
                       onChange={(e) => setToToken(availableTokens.find(t => t.symbol === e.target.value) || availableTokens[1] || availableTokens[0])}
                       className={`appearance-none bg-white pl-3 pr-8 py-2 rounded-xl font-bold shadow-sm border cursor-pointer transition-colors focus:outline-none focus:border-blue-500 ${
                         fromToken.symbol !== toToken.symbol ? 'border-purple-300 text-purple-700' : 'border-gray-200'
-                      }`}
+                      } max-w-[160px] truncate`}
+                      title={toToken.symbol}
                     >
                       {availableTokens.map(t => <option key={t.symbol} value={t.symbol}>{t.icon} {t.symbol}</option>)}
                     </select>
@@ -1353,7 +1634,10 @@ export default function SwapPage() {
                   {/* Route Type */}
                   <div className="flex justify-between">
                     <span className="text-gray-600">Type:</span>
-                    <span className="font-medium text-gray-800">
+                    <span
+                      className="font-medium text-gray-800 max-w-[220px] truncate"
+                      title={effectiveQuote.source === 'aggregator' ? 'Multi-hop via Cetus Aggregator' : `Direct ${fromToken.symbol}-${toToken.symbol} Pool`}
+                    >
                       {effectiveQuote.source === 'aggregator' ? 'Multi-hop via Cetus Aggregator' : `Direct ${fromToken.symbol}-${toToken.symbol} Pool`}
                     </span>
                   </div>
@@ -1417,10 +1701,10 @@ export default function SwapPage() {
                       <div className="flex flex-wrap items-center gap-1 text-[11px] text-gray-700">
                         {(effectiveQuote.routeDetails.steps || []).map((step: RouteStepDisplay, idx: number) => (
                           <span key={`${step.from}-${step.to}-${idx}`} className="flex items-center gap-1">
-                            <span className="px-1.5 py-0.5 bg-white border border-gray-200 rounded">{step.fromSymbol}</span>
+                            <span className="px-1.5 py-0.5 bg-white border border-gray-200 rounded max-w-[120px] truncate" title={step.fromSymbol}>{step.fromSymbol}</span>
                             <span className="text-gray-400">→</span>
-                            <span className="px-1.5 py-0.5 bg-white border border-gray-200 rounded">{step.toSymbol}</span>
-                            <span className="px-1.5 py-0.5 bg-blue-50 text-blue-700 border border-blue-200 rounded">
+                            <span className="px-1.5 py-0.5 bg-white border border-gray-200 rounded max-w-[120px] truncate" title={step.toSymbol}>{step.toSymbol}</span>
+                            <span className="px-1.5 py-0.5 bg-blue-50 text-blue-700 border border-blue-200 rounded max-w-[140px] truncate" title={step.provider}>
                               {step.provider}
                             </span>
                           </span>
@@ -1666,6 +1950,8 @@ export default function SwapPage() {
                 isHighPriceImpact ? 'Price Impact Too High' :
                 mode === 'swap' ? 'Review Swap' : 'Review Transfer'}
             </button>
+          )}
+          </>
           )}
 
       {/* Review Modal */}

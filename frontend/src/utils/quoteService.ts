@@ -21,7 +21,9 @@ type CacheEntry = {
 };
 
 const CACHE_TTL_MS = Number(process.env.NEXT_PUBLIC_QUOTE_CACHE_TTL_MS || 5000);
+const CACHE_MAX = Number(process.env.NEXT_PUBLIC_QUOTE_CACHE_MAX || 200);
 const quoteCache = new Map<string, CacheEntry>();
+const inFlight = new Map<string, Promise<QuoteResponse>>();
 
 const makeKey = (params: QuoteParams) => {
   return [
@@ -34,12 +36,27 @@ const makeKey = (params: QuoteParams) => {
   ].join('|');
 };
 
+const touchCacheEntry = (key: string, entry: CacheEntry) => {
+  quoteCache.delete(key);
+  quoteCache.set(key, entry);
+};
+
+const pruneCache = () => {
+  if (CACHE_MAX <= 0) return;
+  while (quoteCache.size > CACHE_MAX) {
+    const oldestKey = quoteCache.keys().next().value as string | undefined;
+    if (!oldestKey) break;
+    quoteCache.delete(oldestKey);
+  }
+};
+
 export async function getQuoteWithCache(params: QuoteParams) {
   const now = Date.now();
   const key = makeKey(params);
   const cached = quoteCache.get(key);
 
   if (cached && now - cached.ts < CACHE_TTL_MS) {
+    touchCacheEntry(key, cached);
     return {
       ...cached.value,
       meta: {
@@ -49,23 +66,48 @@ export async function getQuoteWithCache(params: QuoteParams) {
     };
   }
 
-  const value: QuoteResponse = await getSwapQuote(
-    params.fromCoinType,
-    params.toCoinType,
-    params.amountIn,
-    params.userAddress,
-    params.byAmountIn !== false
-  );
+  const existing = inFlight.get(key);
+  if (existing) {
+    const value = await existing;
+    return {
+      ...value,
+      meta: {
+        ...(value?.meta || {}),
+        cache: { hit: false, shared: true, ageMs: 0, ttlMs: CACHE_TTL_MS },
+      },
+    };
+  }
 
-  if (value && !value.error) {
-    quoteCache.set(key, { value, ts: now });
+  const request = (async () => {
+    const value: QuoteResponse = await getSwapQuote(
+      params.fromCoinType,
+      params.toCoinType,
+      params.amountIn,
+      params.userAddress,
+      params.byAmountIn !== false
+    );
+
+    if (value && !value.error) {
+      quoteCache.set(key, { value, ts: Date.now() });
+      pruneCache();
+    }
+
+    return value;
+  })();
+
+  inFlight.set(key, request);
+  let value: QuoteResponse;
+  try {
+    value = await request;
+  } finally {
+    inFlight.delete(key);
   }
 
   return {
     ...value,
     meta: {
       ...(value?.meta || {}),
-      cache: { hit: false, ageMs: 0, ttlMs: CACHE_TTL_MS },
+      cache: { hit: false, shared: false, ageMs: 0, ttlMs: CACHE_TTL_MS },
     },
   };
 }

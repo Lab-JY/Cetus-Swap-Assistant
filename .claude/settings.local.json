@@ -22,7 +22,9 @@
       "Bash(codex exec:*)",
       "Bash(npx tsc:*)",
       "Bash(git add:*)",
-      "Bash(git commit -m \"$\\(cat <<''EOF''\nfeat\\(cetus\\): add dynamic token discovery with error handling\n\n- Implement dynamic token list loading from Cetus on-chain registry\n- Add error states and loading indicators for token list\n- Add warning message for token pairs without available pools\n- Optimize pool lookup with static config fast path\n- Improve type safety by removing ''as any'' assertions\n- Fix React useEffect dependencies with functional updates\n\nCo-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>\nEOF\n\\)\")"
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfeat\\(cetus\\): add dynamic token discovery with error handling\n\n- Implement dynamic token list loading from Cetus on-chain registry\n- Add error states and loading indicators for token list\n- Add warning message for token pairs without available pools\n- Optimize pool lookup with static config fast path\n- Improve type safety by removing ''as any'' assertions\n- Fix React useEffect dependencies with functional updates\n\nCo-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(gh repo view:*)",
+      "Bash(test:*)"
     ]
   }
 }

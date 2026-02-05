@@ -27,6 +27,7 @@ const buildRpcList = (network: 'mainnet' | 'testnet'): string[] => {
 const clientCache = new Map<string, SuiClient>();
 const healthCache = new Map<string, { ok: boolean; ts: number }>();
 const HEALTH_TTL_MS = 15_000;
+const HEALTH_TIMEOUT_MS = 3_000;
 
 const getClient = (url: string) => {
   if (!clientCache.has(url)) {
@@ -63,13 +64,25 @@ const pingClient = async (client: SuiClient) => {
   return true;
 };
 
+const withTimeout = async <T>(promise: Promise<T>, ms: number) => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await new Promise<T>((resolve, reject) => {
+      timer = setTimeout(() => reject(new Error('timeout')), ms);
+      promise.then(resolve).catch(reject);
+    });
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+};
+
 const isHealthy = async (url: string) => {
   const cached = healthCache.get(url);
   const now = Date.now();
   if (cached && now - cached.ts < HEALTH_TTL_MS) return cached.ok;
 
   try {
-    await pingClient(getClient(url));
+    await withTimeout(pingClient(getClient(url)), HEALTH_TIMEOUT_MS);
     healthCache.set(url, { ok: true, ts: now });
     return true;
   } catch {
