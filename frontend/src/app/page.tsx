@@ -13,7 +13,7 @@ import { executeWithRetry } from '@/utils/retry';
 import { getFriendlyErrorMessage } from '@/utils/errors';
 import TransactionStepper from '@/components/TransactionStepper';
 import Image from 'next/image';
-import { RefreshCcw, ArrowDownUp, Wallet, LogOut, Copy, CheckCircle2, XCircle, Settings, TrendingUp, Users } from 'lucide-react';
+import { RefreshCcw, ArrowDownUp, Wallet, LogOut, Copy, CheckCircle2, XCircle, Settings, TrendingUp } from 'lucide-react';
 import { getGoogleLoginUrl, clearZkLoginSession, signTransactionWithZkLogin } from '@/utils/zklogin';
 import confetti from 'canvas-confetti';
 import SwapHistory from '@/components/SwapHistory';
@@ -471,6 +471,115 @@ export default function SwapPage() {
           }
         }));
 
+        const formatAmountWithSymbol = (coinType: string, amount: string, precision: number = 4) => {
+          return `${formatCoinAmount(coinType, amount, precision)} ${getTokenSymbol(coinType)}`;
+        };
+
+        const estimateUsdValue = (
+          coinType: string,
+          amount: string,
+          map: Record<string, number | null>
+        ) => {
+          const symbol = getTokenSymbol(coinType);
+          const normalizedSymbol = symbol.toUpperCase();
+          const price = normalizedSymbol === 'USDC' || normalizedSymbol === 'WUSDC'
+            ? 1
+            : map[normalizedSymbol] ?? null;
+          if (!price) return null;
+          const decimals = getCoinDecimals(coinType);
+          const numericAmount = Number(amount) / Math.pow(10, decimals);
+          if (!Number.isFinite(numericAmount)) return null;
+          return numericAmount * price;
+        };
+
+        const buildTradeCardData = (
+          event: SwapEventRecord,
+          map: Record<string, number | null>,
+          rank?: number,
+          totalTrades?: number,
+          recentCount?: number,
+          totalVolume?: string
+        ): TradingCardData => {
+          const amountText = formatAmountWithSymbol(event.fromCoin, event.amountIn);
+          const valueUsd = estimateUsdValue(event.toCoin, event.amountOut, map)
+            ?? estimateUsdValue(event.fromCoin, event.amountIn, map);
+          const valueText = valueUsd !== null
+            ? `$${valueUsd.toFixed(2)}`
+            : formatAmountWithSymbol(event.toCoin, event.amountOut);
+
+          return {
+            trader: {
+              address: event.sender,
+              rank,
+              winRate: 100,
+            },
+            trade: {
+              from: getTokenSymbol(event.fromCoin),
+              to: getTokenSymbol(event.toCoin),
+              amount: amountText,
+              value: valueText,
+              valueLabel: valueUsd !== null ? '估算成交额' : '成交量',
+              route: ['Cetus'],
+              timestamp: event.timestamp || Date.now(),
+            },
+            stats: {
+              totalTrades,
+              totalVolume: totalVolume ?? (valueUsd !== null ? `$${valueUsd.toFixed(2)}` : undefined),
+              followers: recentCount,
+            },
+          };
+        };
+
+        const buildLeaderboardEntries = (
+          eventsData: SwapEventRecord[],
+          map: Record<string, number | null>
+        ): LeaderboardEntry[] => {
+          const traderMap = new Map<string, {
+            totalTrades: number;
+            totalVolumeUsd: number;
+            recentCount: number;
+            latestEvent: SwapEventRecord;
+          }>();
+
+          eventsData.forEach((event) => {
+            if (!event.sender) return;
+            const valueUsd = estimateUsdValue(event.toCoin, event.amountOut, map)
+              ?? estimateUsdValue(event.fromCoin, event.amountIn, map)
+              ?? 0;
+            const entry = traderMap.get(event.sender);
+            if (!entry) {
+              traderMap.set(event.sender, {
+                totalTrades: 1,
+                totalVolumeUsd: valueUsd,
+                recentCount: 1,
+                latestEvent: event,
+              });
+            } else {
+              entry.totalTrades += 1;
+              entry.totalVolumeUsd += valueUsd;
+              entry.recentCount += 1;
+              if (event.timestamp > entry.latestEvent.timestamp) {
+                entry.latestEvent = event;
+              }
+            }
+          });
+
+          return Array.from(traderMap.entries())
+            .sort((a, b) => b[1].totalTrades - a[1].totalTrades || b[1].totalVolumeUsd - a[1].totalVolumeUsd)
+            .slice(0, 3)
+            .map(([address, stats], idx) => ({
+              rank: idx + 1,
+              trader: { address },
+              stats: {
+                totalTrades: stats.totalTrades,
+                totalVolume: stats.totalVolumeUsd > 0 ? `$${stats.totalVolumeUsd.toFixed(2)}` : '—',
+                winRate: 100,
+                followers: stats.recentCount,
+              },
+              recentTrade: buildTradeCardData(stats.latestEvent, map).trade,
+            }));
+        };
+
         const leaderboard = buildLeaderboardEntries(events, priceMap);
         const topEvent = events[0];
         const topEntry = leaderboard.find((entry) => entry.trader.address === topEvent?.sender);
@@ -522,115 +631,6 @@ export default function SwapPage() {
     })
     .map((asset) => `${formatCoinAmount(asset.coinAddress, asset.balance)} ${getTokenSymbol(asset.coinAddress)}`)
     .join(' · ');
-
-  const formatAmountWithSymbol = (coinType: string, amount: string, precision: number = 4) => {
-    return `${formatCoinAmount(coinType, amount, precision)} ${getTokenSymbol(coinType)}`;
-  };
-
-  const estimateUsdValue = (
-    coinType: string,
-    amount: string,
-    priceMap: Record<string, number | null>
-  ) => {
-    const symbol = getTokenSymbol(coinType);
-    const normalizedSymbol = symbol.toUpperCase();
-    const price = normalizedSymbol === 'USDC' || normalizedSymbol === 'WUSDC'
-      ? 1
-      : priceMap[normalizedSymbol] ?? null;
-    if (!price) return null;
-    const decimals = getCoinDecimals(coinType);
-    const numericAmount = Number(amount) / Math.pow(10, decimals);
-    if (!Number.isFinite(numericAmount)) return null;
-    return numericAmount * price;
-  };
-
-  const buildTradeCardData = (
-    event: SwapEventRecord,
-    priceMap: Record<string, number | null>,
-    rank?: number,
-    totalTrades?: number,
-    recentCount?: number,
-    totalVolume?: string
-  ): TradingCardData => {
-    const amountText = formatAmountWithSymbol(event.fromCoin, event.amountIn);
-    const valueUsd = estimateUsdValue(event.toCoin, event.amountOut, priceMap)
-      ?? estimateUsdValue(event.fromCoin, event.amountIn, priceMap);
-    const valueText = valueUsd !== null
-      ? `$${valueUsd.toFixed(2)}`
-      : formatAmountWithSymbol(event.toCoin, event.amountOut);
-
-    return {
-      trader: {
-        address: event.sender,
-        rank,
-        winRate: 100,
-      },
-      trade: {
-        from: getTokenSymbol(event.fromCoin),
-        to: getTokenSymbol(event.toCoin),
-        amount: amountText,
-        value: valueText,
-        valueLabel: valueUsd !== null ? '估算成交额' : '成交量',
-        route: ['Cetus'],
-        timestamp: event.timestamp || Date.now(),
-      },
-      stats: {
-        totalTrades,
-        totalVolume: totalVolume ?? (valueUsd !== null ? `$${valueUsd.toFixed(2)}` : undefined),
-        followers: recentCount,
-      },
-    };
-  };
-
-  const buildLeaderboardEntries = (
-    events: SwapEventRecord[],
-    priceMap: Record<string, number | null>
-  ): LeaderboardEntry[] => {
-    const traderMap = new Map<string, {
-      totalTrades: number;
-      totalVolumeUsd: number;
-      recentCount: number;
-      latestEvent: SwapEventRecord;
-    }>();
-
-    events.forEach((event) => {
-      if (!event.sender) return;
-      const valueUsd = estimateUsdValue(event.toCoin, event.amountOut, priceMap)
-        ?? estimateUsdValue(event.fromCoin, event.amountIn, priceMap)
-        ?? 0;
-      const entry = traderMap.get(event.sender);
-      if (!entry) {
-        traderMap.set(event.sender, {
-          totalTrades: 1,
-          totalVolumeUsd: valueUsd,
-          recentCount: 1,
-          latestEvent: event,
-        });
-      } else {
-        entry.totalTrades += 1;
-        entry.totalVolumeUsd += valueUsd;
-        entry.recentCount += 1;
-        if (event.timestamp > entry.latestEvent.timestamp) {
-          entry.latestEvent = event;
-        }
-      }
-    });
-
-    return Array.from(traderMap.entries())
-      .sort((a, b) => b[1].totalTrades - a[1].totalTrades || b[1].totalVolumeUsd - a[1].totalVolumeUsd)
-      .slice(0, 3)
-      .map(([address, stats], idx) => ({
-        rank: idx + 1,
-        trader: { address },
-        stats: {
-          totalTrades: stats.totalTrades,
-          totalVolume: stats.totalVolumeUsd > 0 ? `$${stats.totalVolumeUsd.toFixed(2)}` : '—',
-          winRate: 100,
-          followers: stats.recentCount,
-        },
-        recentTrade: buildTradeCardData(stats.latestEvent, priceMap).trade,
-      }));
-  };
 
   // 🏗️ Build Swap Transaction Helper
   const buildSwapTransaction = useCallback(async () => {
@@ -923,16 +923,61 @@ export default function SwapPage() {
                 fetchReceiptIdFromDigest(result.digest);
               }
               updateTradeStats(effectiveQuote, true);
-
               // Wait for transaction confirmation
-              setTimeout(() => {
+              setTimeout(async () => {
+                  // CLMM Zap uses 2-step flow for wallet path as well:
+                  // 1) swap to sender 2) transfer swapped token to recipient.
+                  if (mode === 'transfer' && fromToken.symbol !== toToken.symbol && effectiveQuote.source === 'clmm') {
+                      console.log('CLMM Zap: Initiating Step 2 (Transfer)...');
+                      setTxWaitMessage('Step 1 (Swap) complete. Please sign Step 2 (Transfer)...');
+
+                      try {
+                          const tx2 = new Transaction();
+                          const safeAmount = BigInt(effectiveQuote.amountOut) * BigInt(990) / BigInt(1000);
+
+                          const inputCoin2 = await selectAndPrepareCoins(
+                               suiClient,
+                               currentAddress,
+                               toToken.type,
+                               safeAmount,
+                               tx2
+                          );
+
+                          await buildTransferTx(tx2, inputCoin2, recipientAddress, toToken.type, memo);
+
+                          const res2 = await signAndExecuteTransaction({ transaction: tx2 });
+                          setLastTxDigest(res2.digest);
+                          console.log('CLMM Zap Step 2 Success:', res2.digest);
+
+                          setSwapStatus('success');
+                          setAmountIn('');
+                          setQuote(null);
+                          setSuccessModalConfig({
+                              title: 'Zap Transfer Successful!',
+                              desc: `Successfully swapped ${fromToken.symbol} and sent ${toToken.symbol} to recipient (2 Steps).${receiptNote}`,
+                              btnText: 'Close'
+                          });
+                          setTxWaitMessage('');
+                          refetchBalance();
+                          setHistoryRefreshTrigger(prev => prev + 1);
+                          setShowSuccessModal(true);
+                          triggerConfetti();
+                          return;
+                      } catch (err) {
+                          console.error('CLMM Zap Step 2 Failed:', err);
+                          setErrorMessage('Swap succeeded, but transfer failed. Please transfer manually.');
+                          setSwapStatus('error');
+                          return;
+                      }
+                  }
+
                   setSwapStatus('success');
-                  
+
                   // Check for Zap Mode Success
                   if (mode === 'transfer' && fromToken.symbol !== toToken.symbol) {
                       setAmountIn('');
                       setQuote(null);
-                      
+
                       setSuccessModalConfig({
                           title: 'Zap Transfer Successful!',
                           desc: `Successfully swapped ${fromToken.symbol} and sent ${toToken.symbol} to recipient.${receiptNote}`,
@@ -953,7 +998,7 @@ export default function SwapPage() {
                   setHistoryRefreshTrigger(prev => prev + 1); // Trigger history refresh
                   setShowSuccessModal(true);
 
-                  // 🎉 Confetti Effect
+                  // Trigger confetti effect
                   triggerConfetti();
               }, 2000);
           });

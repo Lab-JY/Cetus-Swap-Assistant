@@ -2,6 +2,7 @@
 'use client';
 
 import { useEffect, useState, useRef } from 'react';
+import { useParams } from 'next/navigation';
 import { toPng } from 'html-to-image';
 import { SuiClient, getFullnodeUrl } from '@mysten/sui/client';
 import { SUI_NETWORK } from '@/utils/config';
@@ -44,8 +45,10 @@ const formatAmount = (coinType: string, amount: string, precision: number = 6) =
   return trimmed ? `${whole}.${trimmed}` : whole;
 };
 
-export default function ReceiptPage({ params }: { params: { id: string } }) {
-  const receiptId = decodeURIComponent(params.id || '');
+export default function ReceiptPage() {
+  const params = useParams<{ id: string }>();
+  const rawId = Array.isArray(params?.id) ? params.id[0] : params?.id;
+  const receiptId = decodeURIComponent(rawId || '');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [receipt, setReceipt] = useState<ReceiptData | null>(null);

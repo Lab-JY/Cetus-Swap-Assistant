@@ -76,6 +76,15 @@ type RouteDetails = {
     pathText: string;
 };
 
+type DirectPoolQuote = {
+    amountOut: BN;
+    estimatedFee: number;
+    poolAddress: string;
+    a2b: boolean;
+    rawSwapResult: any;
+    routeDetails: RouteDetails;
+};
+
 type QuoteComparison = {
     directOut: string;
     aggregatorOut: string;
@@ -493,14 +502,7 @@ const getDirectPoolQuote = async (
     toCoinType: string,
     amount: BN,
     byAmountIn: boolean,
-): Promise<{
-    amountOut: BN;
-    estimatedFee: number;
-    poolAddress: string;
-    a2b: boolean;
-    rawSwapResult: any;
-    routeDetails: RouteDetails;
-} | null> => {
+): Promise<DirectPoolQuote | null> => {
     const poolAddress = await getPoolAddressForPair(fromCoinType, toCoinType);
     if (!poolAddress) return null;
 
@@ -575,7 +577,6 @@ export async function getSwapQuote(
 
     let aggregatorError: string | undefined;
     let aggregatorQuote: any | null = null;
-    let directQuote: Awaited<ReturnType<typeof getDirectPoolQuote>> | null = null;
 
     const aggPromise = (async () => {
         const aggStart = Date.now();
@@ -674,18 +675,20 @@ export async function getSwapQuote(
         }
     })();
 
-    const clmmPromise = (async () => {
+    const clmmPromise: Promise<DirectPoolQuote | null> = (async () => {
         const clmmStart = Date.now();
         try {
-            directQuote = await getDirectPoolQuote(fromCoinType, toCoinType, amount, byAmountIn);
+            const quote = await getDirectPoolQuote(fromCoinType, toCoinType, amount, byAmountIn);
             meta.clmmLatencyMs = Date.now() - clmmStart;
+            return quote;
         } catch (error) {
             meta.clmmLatencyMs = Date.now() - clmmStart;
             console.warn("⚠️ Direct pool quote failed...", error);
+            return null;
         }
     })();
 
-    await Promise.all([aggPromise, clmmPromise]);
+    const [, directQuote] = await Promise.all([aggPromise, clmmPromise]);
 
     if (aggregatorQuote) {
         const comparison = computeComparison(toBn(aggregatorQuote.amountOut), directQuote?.amountOut);
@@ -927,15 +930,6 @@ const fetchAggregatorRouters = async (
     amount: BN,
     byAmountIn: boolean
 ) => {
-    if (typeof window === 'undefined') {
-        return await aggregator.findRouters({
-            from: fromCoinType,
-            target: toCoinType,
-            amount,
-            byAmountIn,
-        });
-    }
-
     const url = `/api/cetus/quote?from=${encodeURIComponent(fromCoinType)}&target=${encodeURIComponent(toCoinType)}&amount=${encodeURIComponent(amount.toString())}&byAmountIn=${byAmountIn}`;
     const res = await fetch(url);
     if (!res.ok) {
@@ -1099,7 +1093,7 @@ export async function getRecentSwapEvents(
         );
 
         const events = Array.isArray(swapEvents?.data) ? swapEvents.data : [];
-        const records = events.map((event: any) => {
+        const records: SwapEventRecord[] = events.map((event: any): SwapEventRecord => {
             const data = event.parsedJson as any;
             const timestamp = event.timestampMs ? Number(event.timestampMs) : Number(data?.timestamp || 0);
             return {
@@ -1114,8 +1108,8 @@ export async function getRecentSwapEvents(
         });
 
         return records
-            .filter((record) => record.sender && record.fromCoin && record.toCoin)
-            .sort((a, b) => b.timestamp - a.timestamp)
+            .filter((record: SwapEventRecord) => record.sender && record.fromCoin && record.toCoin)
+            .sort((a: SwapEventRecord, b: SwapEventRecord) => b.timestamp - a.timestamp)
             .slice(0, limit);
     } catch (error) {
         console.error("❌ Error fetching recent swap events:", error);

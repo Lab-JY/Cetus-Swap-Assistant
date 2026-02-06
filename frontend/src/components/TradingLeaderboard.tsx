@@ -1,6 +1,6 @@
 import React from 'react';
-import { Trophy, TrendingUp, Award } from 'lucide-react';
-import TradingCard, { TradingCardData } from './TradingCard';
+import { Trophy, TrendingUp } from 'lucide-react';
+import type { TradingCardData } from './TradingCard';
 
 export interface LeaderboardEntry {
   rank: number;

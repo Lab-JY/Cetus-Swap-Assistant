@@ -74,10 +74,9 @@ export async function fetchSpotPrice(symbol: string): Promise<number | null> {
 function analyzePriceTrend(priceHistory: PriceData[]): {
   trend: 'bullish' | 'bearish' | 'neutral';
   volatility: number;
-  momentum: number;
 } {
   if (priceHistory.length < 2) {
-    return { trend: 'neutral', volatility: 0, momentum: 0 };
+    return { trend: 'neutral', volatility: 0 };
   }
 
   // 计算价格变化
@@ -94,13 +93,9 @@ function analyzePriceTrend(priceHistory: PriceData[]): {
   ) / priceChanges.length;
   const volatility = Math.sqrt(variance);
 
-  // 计算动量（最近价格变化）
-  const recentChanges = priceChanges.slice(-5);
-  const momentum = recentChanges.reduce((sum, change) => sum + change, 0) / recentChanges.length;
-
   const trend = avgChange > 0.02 ? 'bullish' : avgChange < -0.02 ? 'bearish' : 'neutral';
 
-  return { trend, volatility, momentum };
+  return { trend, volatility };
 }
 
 /**
@@ -145,7 +140,7 @@ export async function generateAIInsight(
   estimatedSlippage: number = 0.005 // 0.5%
 ): Promise<AIInsight> {
   // 分析价格趋势
-  const { trend, volatility, momentum } = analyzePriceTrend(priceHistory);
+  const { trend, volatility } = analyzePriceTrend(priceHistory);
 
   // 计算风险评分
   const { score: riskScore, level: riskLevel } = calculateRiskScore(
